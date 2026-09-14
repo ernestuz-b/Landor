@@ -1,0 +1,63 @@
+# Landor formatting — encodes coding_style.md §2-§3.
+# Declaration braces (namespace/class/struct/function) on their own line, control
+# blocks attached; 4 spaces, never tabs; 100 columns preferred, 120 tolerated by review.
+---
+Language: Cpp
+Standard: c++20
+BasedOnStyle: LLVM
+
+ColumnLimit: 100
+MaxEmptyLinesToKeep: 1
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+AccessModifierOffset: -4
+NamespaceIndentation: None
+FixNamespaceComments: true
+
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterEnum: true
+  AfterFunction: true
+  AfterClass: true
+  AfterStruct: true
+  AfterUnion: true
+  AfterExternBlock: true
+  AfterCaseLabel: false
+  AfterControlStatement: Never
+  BeforeCatch: false
+  BeforeElse: false
+  BeforeLambdaBody: false
+  IndentBraces: false
+  SplitEmptyFunction: false
+  SplitEmptyRecord: false
+  SplitEmptyNamespace: false
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortLambdasOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+AlwaysBreakTemplateDeclarations: Yes
+BreakConstructorInitializers: BeforeColon
+BreakInheritanceList: BeforeColon
+AlignConsecutiveDeclarations: None
+AlignConsecutiveAssignments: None
+ReflowComments: false
+
+PointerAlignment: Right
+DerivePointerAlignment: false
+ReferenceAlignment: Right
+
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  # C system headers, e.g. <cstdio>
+  - Regex: '^<[a-z0-9_]+\.h>'
+    Priority: 1
+  # C++ standard library and installed third-party headers
+  - Regex: '^<.*>'
+    Priority: 2
+  # Current project headers
+  - Regex: '^".*'
+    Priority: 3
