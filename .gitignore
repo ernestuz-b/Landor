@@ -1,3 +1,6 @@
 transient/
 *.save
 save.txt
+*.gch
+.qtcreator/
+*.directory
