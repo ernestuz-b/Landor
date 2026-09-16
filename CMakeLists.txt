@@ -12,6 +12,12 @@ add_executable(Landor main.cpp
     src/world/map.hpp src/world/map.cpp
     src/world/chunk.hpp src/world/chunk.cpp
     src/world/area.hpp src/world/area.cpp
+    src/world/orientation.hpp src/world/orientation.cpp
+    src/world/patch.hpp src/world/patch.cpp
+    src/world/layer.hpp src/world/layer.cpp
+    src/world/placement.hpp src/world/placement.cpp
+    src/world/place.hpp src/world/place.cpp
+    src/world/patchset.hpp src/world/patchset.cpp
 )
 
 include(GNUInstallDirs)
