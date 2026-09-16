@@ -18,6 +18,8 @@ add_executable(Landor main.cpp
     src/world/placement.hpp src/world/placement.cpp
     src/world/place.hpp src/world/place.cpp
     src/world/patchset.hpp src/world/patchset.cpp
+    src/world/tile.hpp src/world/tile.cpp
+    src/storage/types.hpp
 )
 
 include(GNUInstallDirs)

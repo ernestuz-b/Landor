@@ -2,6 +2,7 @@
 
 #include "area.hpp"
 #include "layer.hpp"
+#include "../storage/types.hpp"
 
 #include <cstdint>
 #include <span>
@@ -12,10 +13,6 @@ namespace landor::geo
 {
 
 using PatchId       = std::uint16_t;
-using LayerSourceId = std::uint16_t;
-
-inline constexpr LayerSourceId no_layer_source =
-    static_cast<LayerSourceId>(-1);
 
 
 /**
@@ -26,8 +23,8 @@ inline constexpr LayerSourceId no_layer_source =
  */
 struct LayerBinding
 {
-    LayerId       layer;
-    LayerSourceId source;
+    LayerId           layer;
+    storage::SourceId source;
 };
 
 
@@ -116,6 +113,38 @@ public:
 
 
     /**
+     * Find the authored source supplied for a layer.
+     *
+     * Returns nullptr when this Patch contains no authored data for the layer.
+     * Absence does not mean that the property cannot exist there; Map may resolve
+     * it through fallback, procedural generation or live state.
+     *
+     * The number of layers in a patch is expected to be small, so the lookup
+     * is intentionally linear. Do not add indexing machinery without a
+     * measured reason.
+     */
+    [[nodiscard]] constexpr const LayerBinding*
+    binding(LayerId layer) const noexcept
+    {
+        for (const auto& entry : m_layers)
+        {
+            if (entry.layer == layer)
+                return &entry;
+        }
+
+        return nullptr;
+    }
+
+
+    template<Layer LayerT>
+    [[nodiscard]] constexpr const LayerBinding*
+    binding() const noexcept
+    {
+        return binding(LayerT::id);
+    }
+
+
+    /**
      * Returns whether this patch provides authored data for a layer.
      *
      * Absence says nothing about whether the layer exists in the game or may
@@ -123,7 +152,7 @@ public:
      */
     [[nodiscard]] constexpr bool provides(LayerId layer) const noexcept
     {
-        return source(layer) != no_layer_source;
+        return binding(layer) != nullptr;
     }
 
 
@@ -131,34 +160,6 @@ public:
     [[nodiscard]] constexpr bool provides() const noexcept
     {
         return provides(LayerT::id);
-    }
-
-
-    /**
-     * Returns the authored source for a layer.
-     *
-     * Returns no_layer_source when this patch does not provide that layer.
-     *
-     * The number of layers in a patch is expected to be small, so the lookup
-     * is intentionally linear. Do not add indexing machinery without a
-     * measured reason.
-     */
-    [[nodiscard]] constexpr LayerSourceId source(LayerId layer) const noexcept
-    {
-        for (const auto& binding : m_layers)
-        {
-            if (binding.layer == layer)
-                return binding.source;
-        }
-
-        return no_layer_source;
-    }
-
-
-    template<Layer LayerT>
-    [[nodiscard]] constexpr LayerSourceId source() const noexcept
-    {
-        return source(LayerT::id);
     }
 
 
