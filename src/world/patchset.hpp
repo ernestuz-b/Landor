@@ -145,10 +145,10 @@ public:
     [[nodiscard]] constexpr const PatchSetRole*
     role(PatchRoleId id) const noexcept
     {
-        for (const auto& role : m_roles)
+        for (const auto& r : m_roles)
         {
-            if (role.role == id)
-                return &role;
+            if (r.role == id)
+                return &r;
         }
 
         return nullptr;
