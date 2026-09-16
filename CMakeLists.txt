@@ -27,6 +27,8 @@ add_executable(Landor
     # placeholders awaiting their interface drafts
     src/world/chunk.hpp
     src/world/cache.hpp
+    src/storage/storage_contract.hpp
+    src/platform/storage/storage_filesystem.hpp
 )
 
 include(GNUInstallDirs)
