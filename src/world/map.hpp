@@ -265,8 +265,13 @@ public:
      * Place a Patch at its natural authored position.
      *
      * Map allocates and returns a stable PlacementId for the occurrence.
+     *
+     * Returns std::nullopt when every placement slot is occupied. Placement
+     * capacity is a compile-time bound, so exhaustion is a normal outcome and
+     * is reported instead of being hidden behind a reserved PlacementId.
      */
-    [[nodiscard]] PlacementId place(PatchId patch);
+    [[nodiscard]] std::optional<PlacementId>
+    place(PatchId patch);
 
 
     /**
@@ -274,8 +279,11 @@ public:
      *
      * This is the primitive used by PatchSet composition. Reusing an authored
      * Patch does not duplicate its layer data.
+     *
+     * Returns std::nullopt when every placement slot is occupied.
      */
-    [[nodiscard]] PlacementId place(
+    [[nodiscard]] std::optional<PlacementId>
+    place(
         PatchId patch,
         coord_type position,
         Orientation orientation = {});

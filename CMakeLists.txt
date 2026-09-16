@@ -5,21 +5,28 @@ project(Landor LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_executable(Landor main.cpp
-    src/world/cache.hpp src/world/cache.cpp
-    src/world/istorage.hpp
-    src/world/coord.hpp
-    src/world/map.hpp src/world/map.cpp
-    src/world/chunk.hpp src/world/chunk.cpp
-    src/world/area.hpp src/world/area.cpp
-    src/world/orientation.hpp src/world/orientation.cpp
-    src/world/patch.hpp src/world/patch.cpp
-    src/world/layer.hpp src/world/layer.cpp
-    src/world/placement.hpp src/world/placement.cpp
-    src/world/place.hpp src/world/place.cpp
-    src/world/patchset.hpp src/world/patchset.cpp
-    src/world/tile.hpp src/world/tile.cpp
+# The world layer is currently header-only design contracts, so the only
+# translation unit is main.cpp. Headers are listed for IDE visibility; a future
+# implementation file must be added here explicitly to be compiled.
+add_executable(Landor
+    main.cpp
+
     src/storage/types.hpp
+
+    src/world/coord.hpp
+    src/world/area.hpp
+    src/world/layer.hpp
+    src/world/orientation.hpp
+    src/world/tile.hpp
+    src/world/patch.hpp
+    src/world/placement.hpp
+    src/world/patchset.hpp
+    src/world/place.hpp
+    src/world/map.hpp
+
+    # placeholders awaiting their interface drafts
+    src/world/chunk.hpp
+    src/world/cache.hpp
 )
 
 include(GNUInstallDirs)

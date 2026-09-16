@@ -9,11 +9,13 @@
 > and this file is the buggy one — report it, don't follow it.
 >
 > ```
-> last verified   : git HEAD 32a3692 "Drafting the diffrent components, now working on the maps side." (+ dirty tree)
+> last verified   : git HEAD 00cbb8b "Merge commit '285f228d...'"  (+ uncommitted hygiene pass, see §4)
 > verified on     : 2026-09-16
 > verified by     : every command in §5 was actually run, output quoted
-> trust horizon   : if `git log -1 --oneline` no longer shows 32a3692, treat §5–§6 as STALE
+> trust horizon   : if `git log -1 --oneline` no longer shows 00cbb8b, treat §5–§6 as STALE
 >                   and re-run §5 (~1 min) before trusting numbers
+> headline        : THE CMAKE BUILD IS GREEN (main.cpp only). Do not read that as "the design
+>                   headers parse" — nothing compiles them, see §6.
 > ```
 
 ---
@@ -23,13 +25,19 @@
 ```bash
 cd /mnt/AI/AiProgs/experiments/Landor
 git log -1 --oneline && git status --short        # compare against the stamp above
-grep -rn '^namespace' src/*/*.hpp                 # who has migrated to landor:: yet
-cmake -S . -B /tmp/lb -DCMAKE_BUILD_TYPE=Debug >/dev/null && \
-  cmake --build /tmp/lb -j8 2>&1 | grep -c 'error:'   # build health number
+
+# (a) build health — currently trivially green, only main.cpp is compiled
+cmake -S . -B /tmp/lb -DCMAKE_BUILD_TYPE=Debug >/dev/null && cmake --build /tmp/lb -j8 2>&1 | tail -1
+
+# (b) REAL header health — this is the meaningful number now
+for h in src/storage/*.hpp src/world/*.hpp; do \
+  n=$(g++ -fsyntax-only -std=c++20 -Isrc -Iinclude -x c++ "$h" 2>&1 | grep -c 'error:'); \
+  printf '%-28s %s\n' "$h" "$([ "$n" = 0 ] && echo clean || echo "$n errors")"; done
+
 g++ -std=c++20 -Isrc tests/test_coord.cpp -o /tmp/tc && /tmp/tc   # tested code still green?
 ```
 
-If those four outputs match §5, everything below is current and you need nothing else.
+If those outputs match §5, everything below is current and you need nothing else.
 
 **Ignore these directories, always** — they are not source:
 `.kilo/worktrees/` (full duplicate copies of the repo), `transient/` (Qt Creator build output),
@@ -55,24 +63,26 @@ has known drift, see §8.
 
 ```
 main.cpp                     stub: boots managed heap, prints capacity. BUILDS & RUNS.
-CMakeLists.txt               single static lib `landor` + exe; sources listed EXPLICITLY
-                             (no globbing — new files must be added by hand). No tests here.
+CMakeLists.txt               ONE target: exe `Landor` = main.cpp + listed headers. Sources are
+                             listed EXPLICITLY (no globbing — a new file must be added by hand).
+                             No library target, no enable_testing(), no test targets.
 src/storage/types.hpp        landor::storage :: SourceId, Offset, Size, Error, Result, STATUS_OK
-src/world/                   ← all the current activity
-  coord.hpp        13KB   namespace Geo         COMPLETE, tested
-  area.hpp         8.3KB  namespace Geo         COMPLETE, tested
-  layer.hpp        1.4KB  landor::geo           Layer concept + LayerId/layer_count/any_layer
-  tile.hpp         3.6KB  landor::geo           TileView (read) + TileEdit (write); CellWord
-  patch.hpp        4.6KB  landor::geo           Patch + LayerBinding  (just reworked, §4)
-  placement.hpp    5.1KB  landor::geo           Placement = PatchId + position + transform ref
-  patchset.hpp     4.3KB  landor::geo           compose patches/placements into one Area
-  map.hpp          11KB   landor::geo           the hub: resolve/place/at; LAYER_BITS table
-  orientation.hpp  64B    (global)              STUB — real Rotation/Reflection live in .cpp
-  place.hpp        52B    (global)              STUB — real Place body lives in place.cpp
-  chunk.hpp        68B    namespace Geo         STUB
-  cache.hpp        68B    namespace Geo         STUB
-  istorage.hpp     346B   namespace Geo         STUB
-  *.cpp                    mostly empty scaffolds (`Patch::Patch() {}`) that cannot compile
+src/world/                   ← header-only design contracts, NO .cpp files any more (§4)
+  coord.hpp        ✅ clean      namespace Geo         COMPLETE, tested
+  area.hpp         ✅ clean      namespace Geo         COMPLETE, tested
+  layer.hpp        ✅ clean      landor::geo           Layer concept + LayerId/layer_count/any_layer
+  orientation.hpp  ✅ clean      landor::geo           Rotation, Reflection, Orientation (2 bytes)
+  tile.hpp         ✅ clean      landor::geo           TileView (read) + TileEdit (write); CellWord
+  patch.hpp        ❌ 6 errors   landor::geo           Patch + LayerBinding{LayerId, storage::SourceId}
+  placement.hpp    ❌ 7 errors   landor::geo           Placement = PatchId + position + transform ref
+  patchset.hpp     ❌ 6 errors   landor::geo           compose patches/placements into one Area
+  place.hpp        ❌ 7 errors   landor::world         Place = narrative identity over PlacementIds
+  map.hpp          ❌ 15 errors  landor::geo           the hub: resolve/place/at; LAYER_BITS table
+  chunk.hpp        ✅ clean      namespace Geo         placeholder skeleton, nothing uses it
+  cache.hpp        ✅ clean      namespace Geo         placeholder skeleton, nothing uses it
+
+  All ❌ above share ONE cause: the `Geo` → `landor::geo` bridge, see §6.
+src/renderers/utf-8/         empty directory, nothing in it yet
 src/renderers/utf-8/         empty directory, nothing in it yet
 include/managed_heap/        FROZEN single-header object store (SPEC.md, USER_GUIDE.md, examples)
 tests/                       test_coord.cpp, test_area.cpp — hand-rolled mains, no framework
@@ -106,8 +116,18 @@ Don't re-derive the rest here — grep DESIGN_STATE.md for the `D-n` you need.
 to be read and argued over; they declare without defining and are *not expected to compile yet*.
 Treat a header line that fails to parse as intent, not as a bug report.
 
-Dirty tree at last verification: `CMakeLists.txt`, `src/world/{map,patch,patchset}.hpp` modified;
-`src/world/tile.{hpp,cpp}`, `src/storage/types.hpp` newly added.
+**Hygiene pass of 2026-09-16** (uncommitted as of this writing; deletions are staged via `git rm`):
+
+- `Rotation`/`Reflection`/`Orientation` moved from `orientation.cpp` **into `orientation.hpp`**; `.cpp` deleted.
+- `Place` moved from `place.cpp` **into `place.hpp`** (keeps `namespace landor::world`, includes `placement.hpp`);
+  `.cpp` deleted. Both moves verified by compiling a throwaway TU against them.
+- Deleted every obsolete generated stub: `area/cache/chunk/layer/map/patch/patchset/placement/tile.cpp`
+  (all were `X::X() {}` against header-only or template types). `src/world` now has **zero .cpp files**.
+- Deleted `istorage.hpp` — obsolete virtual-interface experiment contradicting build-selected concrete storage.
+- `CMakeLists.txt` reduced to main.cpp + headers, with the two placeholder headers grouped under a comment.
+- `Map::place(...)` (both overloads) now return **`std::optional<PlacementId>`**: placement capacity is a
+  compile-time bound (`std::array<std::optional<placement_type>, MaxPlacements>`) so exhaustion is a
+  legitimate outcome and is visible in the type rather than hidden behind a reserved id.
 
 Decided most recently (2026-09-16, during the `patch.hpp` cleanup):
 
@@ -126,43 +146,49 @@ Decided most recently (2026-09-16, during the `patch.hpp` cleanup):
 
 | check | command | result |
 |---|---|---|
-| configure | `cmake -S . -B /tmp/lb -DCMAKE_BUILD_TYPE=Debug` | OK |
-| full build | `cmake --build /tmp/lb -j8` | ❌ **33 `error:` lines** — see §6 |
+| configure | `cmake -S . -B /tmp/lb -DCMAKE_BUILD_TYPE=Debug` | ✅ OK |
+| full build | `cmake --build /tmp/lb -j8` | ✅ `Built target Landor` — **0 errors** (was 33 before §4) |
+| `tools/checks/check-build.sh` | run it | ✅ exit 0 |
+| binary runs | `./transient/pipeline3/builds/default/Landor` | ✅ `Memory system initialized, usable 65536 bytes.` |
+| header syntax (§0 loop) | per-header `g++ -fsyntax-only` | ✅ 8 clean · ❌ 5 failing, 41 errors total, all cause #1 in §6 |
 | tests, standalone | `g++ -std=c++20 -Isrc tests/test_coord.cpp -o /tmp/tc && /tmp/tc` | ✅ `All 121 tests passed.` |
 | | `g++ -std=c++20 -Isrc tests/test_area.cpp -o /tmp/ta && /tmp/ta` | ✅ `All tests passed.` |
-| CTest | `ctest --test-dir transient/build` | ❌ **not wired**: no `enable_testing()`, no `add_test()`, no test target → `check-tests.sh` exits 2 |
-| `tools/checks/check-build.sh` | run it | ❌ exit 2 (same 33 errors) |
-| `tools/checks/check-static.sh` | run it | ❌ exit 2 — `clang-tidy` **is** installed, but the script configures+builds first and dies on the build |
+| CTest | `ctest --test-dir transient/pipeline3/builds/default` | ❌ `No tests were found!!!` — no `enable_testing()`, no test targets → `check-tests.sh` exits 2 |
+| `tools/checks/check-static.sh` | — | ⚠️ untested since the pass; `clang-tidy` **is** installed at `/usr/bin/clang-tidy` |
+
+**A green build no longer means much.** The only compiled TU is `main.cpp`, which includes nothing from
+`src/world`. The real health signal is the per-header syntax loop in §0 (b), and CMake does **not** run it.
+Until something compiles the headers, edits to them can be silently broken.
 
 Tooling note: the check scripts default `BUILD_DIR` to `transient/pipeline3/builds/{default,static,sanitize}`,
-which is *not* the Qt Creator tree at `transient/build/Desktop_Qt_6_11_2_Debug`. Override with
-`BUILD_DIR=... tools/checks/check-build.sh` if you want them to share one tree.
-| main | `g++ -std=c++20 -Iinclude main.cpp && ./a.out` | ✅ prints `Memory system initialized, usable 65536 bytes.` |
-
-**Because the library target does not build, `main.cpp`'s compile status is only provable standalone.**
-The fastest honest health signal for `coord`/`area` work is the two `g++` one-liners above, not cmake.
-
-Build dir used by Qt Creator is `transient/build/Desktop_Qt_6_11_2_Debug` (Qt 6.11.2 kit; clangd from it).
+which is *not* the Qt Creator tree at `transient/build/Desktop_Qt_6_11_2_Debug` (Qt 6.11.2 kit; clangd from it).
+Override with `BUILD_DIR=... tools/checks/check-build.sh` to share one tree.
 
 ---
 
-## 6. Known breakage ledger (the whole 33 errors reduce to 4 causes)
+## 6. Breakage ledger
 
-1. **Half-finished namespace migration `Geo` → `landor::geo`.** `coord.hpp`/`area.hpp` still declare in
-   `namespace Geo`, while `patch/map/placement/…hpp` are in `landor::geo` and reference unqualified
-   `Coord32`, `Area`, `area_type`. → *fix:* add a using-bridge or finish migrating `coord.hpp`/`area.hpp`.
-   Largest cluster (map.hpp, patch.hpp, placement.hpp).
-2. **`Rotation`/`Reflection` are defined in `src/world/orientation.cpp`, not in the header**
-   (`orientation.hpp` declares an empty `class Orientation`). Any header using them fails. → *fix:* move to
-   `orientation.hpp`; also remove the stray `#pragma once` from `.cpp` files.
-3. **`Place`'s entire class body sits in `place.cpp`** with a 52-byte `place.hpp`. Same fix.
-4. **Empty `.cpp` scaffolds define things that no longer exist as non-templates** — `area.cpp`, `chunk.cpp`,
-   `map.cpp`, `patch.cpp`, `patchset.cpp`, `placement.cpp` all begin `X::X() {}` against now-template types.
-   → *fix:* delete the scaffold definition or make it an explicit instantiation.
+**Fixed by the §4 hygiene pass** (all were the bulk of the old 33 build errors): definitions stranded in
+`.cpp` (`Rotation`/`Reflection`/`Orientation`, `Place`), the `X::X() {}` generated scaffolds, `istorage.hpp`,
+and stale CMake entries for deleted files.
 
-Related, cosmetic-but-real: `patch.hpp` declares `template<typename CoordT = Coord32>` yet its constructor
-parameter is hard-coded `Coord32 natural_position` rather than `coord_type`; `map.hpp`'s `TileView` is
-documented with `At/Lookup/Length` but used as `tiles[...]`; stray `#pragma once` in `orientation.cpp`.
+**Cause #1 — the only remaining blocker.** Half-finished namespace migration `Geo` → `landor::geo`:
+`coord.hpp` (`namespace Geo`, line 11; `using Coord32 = Coord<int32_t>` at line 333) and `area.hpp` still
+declare under `Geo`, while `patch/placement/patchset/place/map.hpp` live in `landor::geo` and name
+`Coord32`, `Area`, `area_type` unqualified. Every one of the 41 header errors bottoms out here.
+→ *fix:* one decision — migrate `coord.hpp`/`area.hpp` to `landor::geo`, or add a bridge such as
+`namespace landor::geo { using Geo::Coord32; using Geo::Coord8; using Geo::Coord16; }` plus an `Area` alias.
+Should be a design decision, not a search-and-replace.
+
+**Structural gap worth closing now:** nothing compiles the world headers, so regressions are invisible.
+Cheapest guards, either is enough: (a) a `tools/checks/check-headers.sh` running the §0(b) loop and failing on
+any error; (b) a `tests/test_headers.cpp` TU that includes every header, wired into CTest.
+
+Still-open design detail inside `map.hpp`: it forward-declares **`landor::geo::Storage`** and holds
+`Storage& m_storage` (same for `Generator&`). Per the current architecture the concrete storage type is
+chosen by the platform header and lives in `landor::storage` (`using Storage = StorageFilesystem;` etc.),
+so `Map` should consume `storage::Storage&` rather than invent its own `geo::Storage`. Left untouched in
+the hygiene pass on purpose — it depends on the platform-selected storage header, which does not exist yet.
 
 ---
 
@@ -197,14 +223,20 @@ When code and doc disagree, note it rather than silently reconciling.
 
 ## 9. Open threads / plausible next tasks
 
-- Get to a green build: causes #1–#4 in §6, in that order of payoff.
-- Decide `Geo` vs `landor::geo` for `coord.hpp`/`area.hpp` (the migration target must be one spelling).
+- Next up per plan: the **platform-selected storage header** (`landor::storage::Storage` = filesystem / SD /
+  ROM), then repoint `Map` at it (§6 last paragraph).
+- Resolve cause #1, the `Geo` → `landor::geo` bridge — the single thing standing between the design headers
+  and compiling.
+- Guard the headers so a green build means something again (§6 structural gap) and wire tests into CMake
+  (`enable_testing()` + one target per test) so `check-tests.sh` stops exiting 2.
 - Where do coordinate z-components live? `Geo::Coord<T>` is **2D (x, y)** but `tile.hpp`/`map.hpp` commentary
   relies on `z == -1` meaning the ground/base plane. Unresolved tension, affects `TileView::base()`.
-- Wire tests into CMake (`enable_testing()` + a target per test) so `check-tests.sh` stops exiting 2.
-- Same "storage owns the identity, geo owns the relationship" cleanup may apply to other `geo` types
-  (`Placement`, `PatchSet`) — check for locally redefined ids.
-- `chunk`/`cache`/`istorage` are stubs waiting on their interface drafts.
+- Consistency sweep when convenient: `Map::set_position/set_rotation/set_reflection/set_orientation` return
+  bare `bool` without `[[nodiscard]]`, now inconsistent with `place()` returning `std::optional`; decide the
+  house style for "may fail" (a shared Landor result type would settle both).
+- Same "storage owns the identity, geo owns the relationship" audit for other `geo` types (`Placement`,
+  `PatchSet`) — check for locally redefined ids.
+- `chunk.hpp`/`cache.hpp` remain placeholder skeletons (`namespace Geo`) waiting on their interface drafts.
 
 ---
 
