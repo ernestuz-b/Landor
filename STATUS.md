@@ -18,7 +18,7 @@
 > headline        : EVERY HEADER UNDER src/ COMPILES AND CTest RUNS 13 GREEN TESTS.
 >                   tests/test_world_headers.cpp pulls all of them into one TU, so a green
 >                   build now really does mean "the design contracts still fit together" —
->                   all 15 headers under src/, 14 green tests.
+>                   all 15 headers under src/, 53 green tests.
 > ```
 
 ---
@@ -43,8 +43,9 @@ git ls-files 'src/*.hpp' | while read -r h; do \
   n=$(g++ -fsyntax-only -std=c++20 -Isrc -Iinclude -x c++ "$h" 2>&1 | grep -c 'error:'); \
   printf '%-34s %s\n' "$h" "$([ "$n" = 0 ] && echo clean || echo "$n errors")"; done
 
-g++ -std=c++20 -Isrc tests/test_coord.cpp -o /tmp/tc && /tmp/tc   # legacy mains, not in CMake
 ```
+
+There are no hand-rolled test mains left: everything runs through `ctest`. See §2 for the file layout.
 
 If those outputs match §5, everything below is current and you need nothing else.
 
@@ -94,11 +95,15 @@ src/world/                   ← header-only design contracts, NO .cpp files any
 
   No `namespace Geo` remains anywhere in src/. The migration was cause #1 in §6.
 src/renderers/utf-8/         empty directory, nothing in it yet
-src/renderers/utf-8/         empty directory, nothing in it yet
 include/managed_heap/        FROZEN single-header object store (SPEC.md, USER_GUIDE.md, examples)
-tests/                       test_world_headers.cpp + test_geo_headers.cpp are the GoogleTest TUs;
-                             test_coord.cpp / test_area.cpp are legacy hand-rolled mains, still run
-                             by hand (§0), not wired into CMake
+tests/                       ALL GoogleTest now, one file per contract header, all three wired into
+                               landor_tests:
+                                 test_world_headers.cpp  compile tripwire + cross-header type identity
+                                 test_coord.cpp          Coord/Dir behaviour (27 tests)
+                                 test_area.cpp           Area behaviour (21 tests)
+                               The old hand-rolled mains in test_coord/test_area were migrated into
+                               themselves and deleted; test_geo_headers.cpp was absorbed by the two
+                               unit files (duplicate TEST names would collide in one binary).
 tools/checks/                check-build|tests|warnings|sanitizers|static|tidy-changed.sh
 dev-docs/                    DESIGN_STATE.md · IMPLEMENTATION.md · coding_rules.md · coding_style.md
 docs/GAMEPLAY.md             player guide
@@ -164,11 +169,18 @@ Decided most recently (2026-09-16, during the `patch.hpp` cleanup):
 | `tools/checks/check-build.sh` | `BUILD_DIR=…/transient/build/verify tools/checks/check-build.sh` | ✅ exit 0 |
 | binary runs | `./transient/build/verify/Landor` | ✅ `Memory system initialized, usable 65536 bytes.` |
 | header syntax (§0 loop) | per-header `g++ -fsyntax-only` | ✅ **15 / 15 clean** (was 8 clean · 41 errors) |
-| tests, standalone | `g++ -std=c++20 -Isrc tests/test_coord.cpp -o /tmp/tc && /tmp/tc` | ✅ `All 121 tests passed.` |
-| | `g++ -std=c++20 -Isrc tests/test_area.cpp -o /tmp/ta && /tmp/ta` | ✅ `All tests passed.` |
-| CTest | `ctest --test-dir transient/build/verify --output-on-failure` | ✅ `100% tests passed, 0 tests failed out of 14` (5 WorldHeaders · 6 Coord32 · 3 Area32) |
+| CTest | `ctest --test-dir transient/build/verify --output-on-failure` | ✅ `100% tests passed, 0 tests failed out of 53` (20 Area32 · 11 Coord32 · 10 Coord8 · 5 WorldHeaders · 4 Coord16 · 2 Coordinates · 1 AreaWidths) |
+| test sensitivity (mutation spot-check) | 25 targeted single-line mutations of `coord.hpp`/`area.hpp`, each rebuilt and run | ✅ **23 caught** — 19 by failing assertions, 4 by breaking compilation. The 2 survivors are *equivalent mutants*, see §6 |
 | `tools/checks/check-tests.sh` | same `BUILD_DIR` | ✅ exit 0 (used to exit 2 — "No tests were found") |
 | `tools/checks/check-static.sh` | — | ⚠️ untested since the pass; `clang-tidy` **is** installed at `/usr/bin/clang-tidy` |
+
+**Tests are graded, not just present.** A 25-mutation spot-check of `coord.hpp`/`area.hpp` (flip a sign, drop
+a guard, break a sort) is caught by 23 of them. Two survive and both are *equivalent* — no test can see them:
+`Area::from_coords` swapping its two x corners (the constructor sorts per axis, so the object is identical),
+and `Area::is_empty()` ignoring the y clause (y-only inversion is unreachable: both constructors and `assign()`
+sort both axes, and the empty sentinel `(1,1)/(0,0)` inverts x as well). Two gaps that the sweep *did* expose
+have been closed: an origin-centred union test that passed only because the empty sentinel sat inside it, and
+`dist_sq()` promotion, which needed extreme int16 corners to become observable.
 
 **A green build now means what it should.** `landor_tests` compiles `tests/test_world_headers.cpp`, which
 includes all 15 headers under `src/` in one TU and asserts that the cross-header aliases agree (`Map::patch_type`
@@ -206,6 +218,12 @@ needed, which is the strongest evidence the migration was the single cause.
 registered through `gtest_discover_tests()`. A `check-headers.sh` script is therefore optional; if one is
 wanted later it should shell out to §0 (b) purely to name the offending header faster.
 
+**Fixed while migrating the tests:** `Coord::rotate_90ccw()` / `rotate_90cw()` built their result with
+`T{-m_y}` / `T{-m_x}`, i.e. a braced init holding an `int`. For the narrow scalars (`Coord8`, `Coord16`) that
+is a narrowing conversion: GCC diagnosed it, **clang rejects it outright**, and nothing instantiated those two
+functions for `Coord8` before the migrated tests did. Both now use `static_cast<T>(-m_y)`, matching how
+`operator-` and `rotate_180()` already did it in the same file.
+
 **Fixed alongside, found while writing the neighbour tests:** `Coord::neighbour8(5)` returned due **west**
 instead of north-west (`dy = -T{0}` in the octant table, so north and west were not distinct neighbours of a
 cell). Corrected in `coord.hpp`; `Coord32.Neighbour8CoversEveryOctantExactlyOnce` pins all eight octants and
@@ -242,7 +260,7 @@ the hygiene pass on purpose — it depends on the platform-selected storage head
 |---|---|
 | `managed-heap/` at repo root | `include/managed_heap/` |
 | refers to `../AGENTS.md` | does not exist (no AGENTS.md/CLAUDE.md anywhere) |
-| tests use GoogleTest | now true for the CMake-wired TUs; `test_coord.cpp`/`test_area.cpp` are still hand-rolled `if (...) return N;` mains pending conversion |
+| tests use GoogleTest | now true — every test runs through CTest (see §2, §5) |
 | `src/game/`, `src/render/`, `src/actor/`, `src/npc/`, `src/host/` | absent; only `src/world`, `src/storage`, `src/renderers/utf-8` (empty) |
 | `assets/`, `tools/gen_starter_map.py` | absent |
 
@@ -256,8 +274,17 @@ When code and doc disagree, note it rather than silently reconciling.
 - Next up per plan: the **platform-selected storage header** (`landor::storage::Storage` = filesystem / SD /
   ROM), then repoint `Map` at it (§6 last paragraph).
 - ~~Resolve cause #1, the `Geo` → `landor::geo` bridge~~ — done, see §6. Revisit only if D-08 is reopened.
-- ~~Guard the headers / wire tests into CMake~~ — done (`tests/test_world_headers.cpp`, 13 passing tests).
-  Next conversions: move the coverage of the two legacy hand-rolled mains into GoogleTest and delete them.
+- ~~Guard the headers / wire tests into CMake~~ — done (`tests/test_world_headers.cpp`).
+- ~~Convert the legacy hand-rolled mains~~ — done: `test_coord.cpp`/`test_area.cpp` are GoogleTest now and
+  `test_geo_headers.cpp` is absorbed; 53 tests run under `ctest`. When new world code lands, keep the rule:
+  **one test file per contract header, added to `landor_tests` explicitly** (CMake does not glob).
+- **`Coord::manhattan()` / `chebyshev()` are not usable in constant expressions on clang.** They call
+  `std::abs` on the promoted difference; glibc declares `abs(int)` non-constexpr and clang refuses the call in
+  a `static_assert`, while GCC constant-folds it anyway. So "the contracts are constexpr throughout" is true
+  on the current compiler only. Fixing it means computing the magnitude inside the header (`v < 0 ? -v : v`,
+  being deliberate about the most-negative value) instead of `std::abs`; that changes a header the project
+  calls COMPLETE, so it needs a decision, not a quiet edit. Left as-is; the runtime path is tested and the
+  `static_assert` is deliberately absent (see the comment in `tests/test_coord.cpp`).
 - Where do coordinate z-components live? `landor::geo::Coord<T>` is **2D (x, y)** but `tile.hpp`/`map.hpp` commentary
   relies on `z == -1` meaning the ground/base plane. Unresolved tension, affects `TileView::base()`.
 - Consistency sweep when convenient: `Map::set_position/set_rotation/set_reflection/set_orientation` return

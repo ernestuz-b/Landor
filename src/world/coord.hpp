@@ -240,7 +240,7 @@ public:
 
     /// Rotate 90° counter-clockwise around the origin.
     [[nodiscard]] constexpr Coord rotate_90ccw() const noexcept {
-        return Coord{T{-m_y}, m_x};
+        return Coord(static_cast<T>(-m_y), m_x);
     }
 
     /// Rotate 180° around the origin.
@@ -250,7 +250,7 @@ public:
 
     /// Rotate 90° clockwise around the origin.
     [[nodiscard]] constexpr Coord rotate_90cw() const noexcept {
-        return Coord{m_y, T{-m_x}};
+        return Coord(m_y, static_cast<T>(-m_x));
     }
 
     /// Apply a 90° ccw rotation to *this*.

@@ -81,7 +81,9 @@ if(LANDOR_BUILD_TESTS)
         # Compile tripwire: every header under src/ in one translation unit.
         tests/test_world_headers.cpp
 
-        tests/test_geo_headers.cpp
+        # Behavioural tests, one file per contract header.
+        tests/test_area.cpp
+        tests/test_coord.cpp
     )
     target_include_directories(landor_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_link_libraries(landor_tests PRIVATE GTest::gtest_main)
