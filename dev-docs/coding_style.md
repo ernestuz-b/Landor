@@ -245,12 +245,10 @@ Use `class` as soon as a type owns an invariant or behaviour (`World`, `Game`, r
 
 ## 7. Source Layout
 
-The project uses a standard include/src split.
+The project doen't use a standard include/src split.
 
 Rules:
 
-- public headers live under `include/example/`;
-- implementation (.cpp) lives under `src/<subsystem>/`;
 - every public header must be self-contained;
 - prefer `.hpp`/`.cpp` splits for non-trivial code;
 - trivially inline functions may remain in headers;
@@ -329,11 +327,13 @@ Do not reuse variables for different meanings.
 Prefer simple control flow and early validation.
 
 ```cpp
-if (!is_square(a)) {
+if (!is_square(a)) 
+{
     return LinearStatus::DimensionMismatch;
 }
 
-if (!is_supported_scalar<Scalar>) {
+if (!is_supported_scalar<Scalar>) 
+{
     return LinearStatus::UnsupportedScalarDomain;
 }
 
@@ -349,7 +349,8 @@ Failure examples should preserve diagnostics.
 Good:
 
 ```cpp
-if (pivot_abs <= tolerance) {
+if (pivot_abs <= tolerance) 
+{
     return LinearResult<Matrix>{
         .value = {},
         .status = LinearStatus::Singular,
@@ -363,77 +364,12 @@ if (pivot_abs <= tolerance) {
 Bad:
 
 ```cpp
-if (pivot_abs <= tolerance) {
+if (pivot_abs <= tolerance) 
+{
     return {};
 }
 ```
 
-## 13. Numerical API Naming
-
-Prefer solve over inverse when solving systems.
-
-```cpp
-auto x = solve(a, b);
-```
-
-Avoid:
-
-```cpp
-auto x = inverse(a) * b;
-```
-
-Distinguish elementwise and matrix functions.
-
-```cpp
-elem_exp(a)
-matrix_exp(a)
-elem_pow(a, 2)
-matrix_power(a, 2)
-```
-
-Unsafe numerical paths must be explicit.
-
-```cpp
-auto inv = inverse(a, SolvePolicy::FastUnchecked);
-```
-
-## 14. Public API Style
-
-Prefer free functions for mathematical operations.
-
-```cpp
-solve(a, b)
-inverse(a)
-transpose(a)
-determinant(a)
-```
-
-Use member functions for object properties and direct access.
-
-```cpp
-matrix.rows()
-matrix.cols()
-matrix.data()
-matrix.size()
-```
-
-Avoid APIs that imply hidden mutation unless mutation is explicit.
-
-```cpp
-auto b = transpose(a);
-transpose_in_place(a);
-```
-
-Operators are allowed for ordinary matrix arithmetic.
-
-```cpp
-a + b
-a - b
-a * b
-scalar * a
-```
-
-Avoid operators for operations where mathematical meaning is domain-dependent or ambiguous.
 
 ## 15. Comments
 
@@ -442,8 +378,8 @@ Comments should explain why, not repeat what the code says.
 Good:
 
 ```cpp
-// Use pivoted LU by default. The no-pivot path is only valid when the caller
-// explicitly accepts the risk through SolvePolicy::FastUnchecked.
+/* Use pivoted LU by default. The no-pivot path is only valid when the caller
+   explicitly accepts the risk through SolvePolicy::FastUnchecked. */
 ```
 
 Bad:
@@ -456,13 +392,18 @@ Bad:
 Every non-trivial numerical algorithm should include a short algorithm block.
 
 ```cpp
-// Algorithm: LU decomposition with partial pivoting
-// Domain: floating-point and complex floating-point
-// Structure: general square matrix
-// Complexity: O(N^3)
-// Allocation: none for StaticMatrix; workspace-controlled for DynamicMatrix
-// Failure: returns Singular or NearSingular on poor pivots
+/* Algorithm: LU decomposition with partial pivoting
+   Domain: floating-point and complex floating-point
+   Structure: general square matrix
+   Complexity: O(N^3)
+   Allocation: none for StaticMatrix; workspace-controlled for DynamicMatrix
+   Failure: returns Singular or NearSingular on poor pivots
+*/
 ```
+
+Use // style comments for single line, and /* ... */ style for multiline comments.
+
+Also use **Doxygen** style comments.
 
 ## 16. Test Naming Style
 

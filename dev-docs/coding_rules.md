@@ -189,6 +189,9 @@ Rules:
 - determinism is asserted, not assumed: identical scripted input must produce identical
   world digests, and any container iteration that can influence logic output or rendered
   state must have a defined order (`IMPLEMENTATION.md` §7.1).
+- The test directory tree follows the same tree structure as `src/` but under `tests/`, so
+  `src/directory-a/example.cpp` is tested in `tests/directory-a/example.cpp`
+- test coverage should reach 85%+ minimum, targetting a 100% when possible.
 
 For numerical code, test residuals and invariants, not only element-by-element equality.
 
