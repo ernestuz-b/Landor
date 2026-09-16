@@ -36,3 +36,45 @@ install(TARGETS Landor
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+
+# ---------------------------------------------------------------------------
+# Tests: GoogleTest is fetched on demand, nothing is vendored in the repo.
+#
+#   cmake -S . -B transient/build && cmake --build transient/build && ctest
+#   cmake --build transient/build   # ... once is enough: the tarball lands in
+#                                    # <build>/_deps and is reused afterwards
+#   -DLANDOR_BUILD_TESTS=OFF        # skip the download altogether
+#   -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/path/to/googletest
+#                                   # use a local copy, no network at all
+# ---------------------------------------------------------------------------
+option(LANDOR_BUILD_TESTS "Build the unit tests (downloads GoogleTest on first configure)" ON)
+
+if(LANDOR_BUILD_TESTS)
+    # Extracted files get the extraction timestamp, not the archive's, so a URL
+    # change triggers a rebuild instead of silently reusing stale headers.
+    if(POLICY CMP0135)
+        cmake_policy(SET CMP0135 NEW)
+    endif()
+
+    include(FetchContent)
+
+    FetchContent_Declare(googletest
+        URL      https://github.com/google/googletest/archive/refs/tags/v1.18.0.tar.gz
+        URL_HASH SHA256=6e3191c1455468b3fc35a417fb565c1c5071aee1b7e7f85e30cf48a98d37d8b5
+    )
+
+    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)          # don't install gtest with Landor
+    set(BUILD_GMOCK   OFF CACHE BOOL "" FORCE)          # TEST() only, no gmock
+
+    FetchContent_MakeAvailable(googletest)
+
+    enable_testing()
+    include(GoogleTest)
+
+    add_executable(landor_tests
+        tests/test_geo_headers.cpp
+    )
+    target_include_directories(landor_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(landor_tests PRIVATE GTest::gtest_main)
+    gtest_discover_tests(landor_tests)
+endif()
