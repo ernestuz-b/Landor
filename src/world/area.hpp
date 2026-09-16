@@ -8,7 +8,8 @@
 
 #include "coord.hpp"
 
-namespace Geo {
+namespace landor::geo
+{
 
 /** Axis-aligned rectangular region on the tile grid.
  *
@@ -16,7 +17,7 @@ namespace Geo {
  * maintained such that min.x <= max.x and min.y <= max.y. An area with
  * min > max in either axis is considered empty.
  *
- * Template parameter CoordT must be a Geo::Coord<N> type; the size method
+ * Template parameter CoordT must be a landor::geo::Coord<N> type; the size method
  * uses the scalar type's integer arithmetic.
  */
 template <typename CoordT = Coord32>
@@ -202,4 +203,4 @@ std::ostream& operator<<(std::ostream& os, Area<T> a) noexcept {
     return os << '[' << a.min() << '-' << a.max() << ']';
 }
 
-}  // namespace Geo
+} // namespace landor::geo

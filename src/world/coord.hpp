@@ -8,7 +8,8 @@
 #include <type_traits>
 #include <utility>
 
-namespace Geo {
+namespace landor::geo
+{
 
 /** Cardinal direction on the grid.
  *
@@ -284,7 +285,7 @@ public:
         case 2:  dx =  T{0}; dy =  T{1}; break;  // south
         case 3:  dx = -T{1}; dy =  T{1}; break;  // south-west
         case 4:  dx = -T{1}; dy =  T{0}; break;  // west
-        case 5:  dx = -T{1}; dy = -T{0}; break;  // north-west
+        case 5:  dx = -T{1}; dy = -T{1}; break;  // north-west
         case 6:  dx =  T{0}; dy = -T{1}; break;  // north
         case 7:  dx =  T{1}; dy = -T{1}; break;  // north-east
         default: return *this;                       // out-of-range
@@ -342,4 +343,4 @@ std::ostream& operator<<(std::ostream& os, Coord<T> c) noexcept {
     return os << '(' << c.x() << ',' << c.y() << ')';
 }
 
-}  // namespace Geo
+} // namespace landor::geo

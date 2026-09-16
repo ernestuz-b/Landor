@@ -40,12 +40,18 @@ install(TARGETS Landor
 # ---------------------------------------------------------------------------
 # Tests: GoogleTest is fetched on demand, nothing is vendored in the repo.
 #
-#   cmake -S . -B transient/build && cmake --build transient/build && ctest
-#   cmake --build transient/build   # ... once is enough: the tarball lands in
-#                                    # <build>/_deps and is reused afterwards
-#   -DLANDOR_BUILD_TESTS=OFF        # skip the download altogether
+#   cmake -S . -B transient/build
+#   cmake --build transient/build      # first configure downloads GoogleTest;
+#                                      # the tarball lands in <build>/_deps and
+#                                      # is reused afterwards
+#   ctest --test-dir transient/build --output-on-failure
+#                                      # --test-dir keeps ctest out of the
+#                                      # source tree
+#
+# Options:
+#   -DLANDOR_BUILD_TESTS=OFF           # skip the download altogether
 #   -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/path/to/googletest
-#                                   # use a local copy, no network at all
+#                                      # use a local copy, no network at all
 # ---------------------------------------------------------------------------
 option(LANDOR_BUILD_TESTS "Build the unit tests (downloads GoogleTest on first configure)" ON)
 
@@ -72,6 +78,9 @@ if(LANDOR_BUILD_TESTS)
     include(GoogleTest)
 
     add_executable(landor_tests
+        # Compile tripwire: every header under src/ in one translation unit.
+        tests/test_world_headers.cpp
+
         tests/test_geo_headers.cpp
     )
     target_include_directories(landor_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
