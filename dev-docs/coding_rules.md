@@ -2,9 +2,7 @@
 
 These are durable engineering rules for modifying Landor.
 
-Formatting and naming live in [`coding_style.md`](coding_style.md). Architecture lives in
-[`DESIGN_STATE.md`](DESIGN_STATE.md) and rationale in
-[`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md).
+Formatting and naming live in [`coding_style.md`](coding_style.md). Architecture lives in [`DESIGN_STATE.md`](DESIGN_STATE.md) and rationale in [`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md).
 
 ## 1. Work in small, reviewable slices
 
@@ -49,8 +47,7 @@ Prefer language/library facilities that make the contract clearer:
 - `std::source_location`;
 - named strong/policy types.
 
-"Modern" is not permission for template acrobatics. Cleverness that hides ownership,
-allocation, generated code cost, control flow or failure semantics is a regression.
+"Modern" is not permission for template acrobatics. Cleverness that hides ownership, allocation, generated code cost, control flow or failure semantics is a regression.
 
 ## 3. No exceptions
 
@@ -58,11 +55,9 @@ Landor code does not throw or catch exceptions.
 
 Recoverable outcomes are explicit values/result types.
 
-External development libraries such as GoogleTest/GoogleMock may use their normal
-implementation facilities; that does not make exceptions part of Landor.
+External development libraries such as GoogleTest/GoogleMock may use their normal implementation facilities; that does not make exceptions part of Landor.
 
-Do not make normal Landor control flow depend on exception-oriented accessors such as
-`std::expected::value()`.
+Do not make normal Landor control flow depend on exception-oriented accessors such as `std::expected::value()`.
 
 ## 4. No RTTI
 
@@ -72,8 +67,7 @@ Do not use:
 - `typeid`;
 - RTTI-driven dispatch.
 
-Use build selection, templates/concepts, explicit tags/ids or runtime polymorphism according
-to when the concrete choice is known.
+Use build selection, templates/concepts, explicit tags/ids or runtime polymorphism according to when the concrete choice is known.
 
 ## 5. Ownership and lifetime
 
@@ -108,19 +102,15 @@ If the capacity is fixed at compile time, it normally belongs in the type.
 
 Use `include/managed_heap/` only when dynamic allocation is genuinely unavoidable.
 
-It is an imported component from another project. Do not modify it as part of ordinary
-Landor cleanup or feature work. Changes require an explicit reason and separate review.
+It is an imported component from another project. Do not modify it as part of ordinary Landor cleanup or feature work. Changes require an explicit reason and separate review.
 
 Use the component through its public API and documentation.
 
 ### Standard containers
 
-Allocating STL containers are allowed only when their cost and allocator semantics are
-appropriate.
+Allocating STL containers are allowed only when their cost and allocator semantics are appropriate.
 
-Do not assume the managed heap can be supplied as an STL allocator merely because it
-allocates memory. Relocation can invalidate the pointer stability expected by ordinary
-containers.
+Do not assume the managed heap can be supplied as an STL allocator merely because it allocates memory. Relocation can invalidate the pointer stability expected by ordinary containers.
 
 Avoid hidden allocation in:
 
@@ -132,21 +122,23 @@ Avoid hidden allocation in:
 
 ## 7. Compile-time capacities and policies
 
-When a value affects layout/capacity and is fixed at compile time, make it a template or
-non-type template parameter.
+When a value affects layout/capacity and is fixed at compile time, make it a template or non-type template parameter.
 
-For several related values, prefer a named structural policy:
+For several related values, prefer a named structural policy once it is clearer than positional integers. For example:
 
 ```cpp
 struct MapCapacity
 {
     std::size_t placements;
-    std::size_t tile_cache;
+    std::size_t cache_slots;
+    std::size_t cache_chunk_side;
 };
 
 template<MapCapacity Capacity>
 class Map;
 ```
+
+The current `Map` source still uses direct non-type template parameters; this example shows the preferred direction if/when the capacity list becomes awkward.
 
 Do not hide object-layout decisions behind deep global config lookups.
 
@@ -154,8 +146,7 @@ Do not hide object-layout decisions behind deep global config lookups.
 
 A contained application/global configuration object is allowed.
 
-Deep subsystems must not access it directly. Interpret configuration at the composition
-root and pass the exact value/policy/object needed.
+Deep subsystems must not access it directly. Interpret configuration at the composition root and pass the exact value/policy/object needed.
 
 CMake should use:
 
@@ -191,8 +182,7 @@ Do not add a virtual interface merely to abstract a build-known implementation.
 
 Do not build platform-selector macro forests in common code.
 
-Platform code may call C/vendor HAL APIs directly when appropriate. Add a C++ wrapper only
-when Landor needs a semantic boundary.
+Platform code may call C/vendor HAL APIs directly when appropriate. Add a C++ wrapper only when Landor needs a semantic boundary.
 
 ## 10. Error handling
 
@@ -223,8 +213,7 @@ Programming faults are not normal runtime failures.
 
 Assert internal invariants in diagnostic builds.
 
-Do not convert corrupted internal state into an ordinary recoverable result merely to keep
-the program running.
+Do not convert corrupted internal state into an ordinary recoverable result merely to keep the program running.
 
 In production, only add special fatal handling when it has meaningful semantics such as:
 
@@ -250,8 +239,7 @@ Rules:
 - make promotion width explicit where overflow is possible;
 - use compile-time checks when a numeric relationship is static.
 
-C-style casts are forbidden except at an unavoidable C/vendor boundary, and even there a
-C++ cast is preferred when practical.
+C-style casts are forbidden except at an unavoidable C/vendor boundary, and even there a C++ cast is preferred when practical.
 
 ## 13. Concurrency
 
@@ -261,8 +249,7 @@ Prefer single-writer ownership and message passing.
 
 Mutexes are fine for ordinary host shared data.
 
-Atomics require a documented publication/ordering reason. Do not use relaxed atomics by
-habit.
+Atomics require a documented publication/ordering reason. Do not use relaxed atomics by habit.
 
 For SPSC queues:
 
@@ -292,8 +279,7 @@ Required direction:
 - fixed-capacity embedded transport;
 - no required dynamic allocation.
 
-On embedded targets, prefer a small local UART/ISR path over introducing a logging
-framework.
+On embedded targets, prefer a small local UART/ISR path over introducing a logging framework.
 
 ## 15. Templates, concepts and compile-time code
 
@@ -313,15 +299,13 @@ Avoid recursive metaprogramming when normal compile-time code is clearer.
 
 Use `static_assert` for compile-time architectural relationships.
 
-"Viva la constness" is a project virtue, but do not distort an otherwise simple algorithm
-solely to earn a `constexpr` badge.
+"Viva la constness" is a project virtue, but do not distort an otherwise simple algorithm solely to earn a `constexpr` badge.
 
 ## 16. Public/class API design
 
 Landor is an application, not a library, but class interfaces still matter.
 
-The public part of a class should be complete enough that another subsystem can use it
-naturally without reaching into internals or inventing helpers.
+The public part of a class should be complete enough that another subsystem can use it naturally without reaching into internals or inventing helpers.
 
 Keep implementation details private.
 
@@ -329,15 +313,13 @@ Prefer explicit names and predictable overloads.
 
 Make ownership, allocation, lifetime and expensive operations visible.
 
-Do not minimize a public surface merely for the sake of minimalism if doing so makes the
-class harder to use correctly.
+Do not minimize a public surface merely for the sake of minimalism if doing so makes the class harder to use correctly.
 
 ## 17. Includes
 
 Prefer direct includes for actual contracts.
 
-Do not pursue forward declarations as a style goal. Use them when they materially reduce
-coupling or solve a real include problem.
+Do not pursue forward declarations as a style goal. Use them when they materially reduce coupling or solve a real include problem.
 
 Every header must compile independently of accidental include order.
 
@@ -418,8 +400,7 @@ After modifying code:
 - run the full suite for cross-contract changes;
 - build with warnings as errors.
 
-Do not add arbitrary project-wide coverage percentages at this stage. Coverage targets may
-be introduced later when they serve a concrete purpose.
+Do not add arbitrary project-wide coverage percentages at this stage. Coverage targets may be introduced later when they serve a concrete purpose.
 
 ## 20. CMake and build tree
 
@@ -455,7 +436,6 @@ Use `DESIGN_DECISIONS.md` for broader rejected alternatives/rationale.
 
 Do not turn headers into chronological design diaries.
 
-When an architectural change makes an existing substantial comment false, updating the
-comment is part of the code change.
+When an architectural change makes an existing substantial comment false, updating the comment is part of the code change.
 
 The same applies to relevant Markdown documentation.
