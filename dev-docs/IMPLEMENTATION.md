@@ -4,7 +4,7 @@ This document explains how the current source contracts fit together.
 
 It is intentionally narrower than `DESIGN_STATE.md`: it describes the implementation shape we are actively building, not every future gameplay system.
 
-For the detailed mapping model, read `MAPPING_MODEL.md` as well.
+For the detailed mapping model, read `MAPPING_MODEL.md` as well. The authored layer file contract is defined separately in `LAYER_SOURCE_FORMAT.md`.
 
 ## 1. Current layers of the codebase
 
@@ -199,6 +199,30 @@ Layer lookup is intentionally linear because the number of bound layers is expec
 
 Absence is returned as `nullptr`.
 
+### Authored layer source format
+
+`dev-docs/LAYER_SOURCE_FORMAT.md` defines the current version 1.0 authored source layout.
+
+One source corresponds to one Patch layer and conventionally uses:
+
+```text
+<PatchName>.<LayerName>.layer
+```
+
+The file begins with LF-terminated metadata records. `V`, `D`, and `P` currently describe the format version, dimensions, and authored natural position. The first empty line (`0x0A 0x0A`) ends metadata.
+
+The remaining bytes are a dense one-byte-per-cell row-major grid. Each row contains exactly the declared width in cell bytes followed by one LF. ASCII space (`0x20`) means “this Patch has no authored contribution for this layer at this coordinate”; it is not synonymous with runtime zero.
+
+Once `data_offset` is known, Patch-local cell `(x, y)` has physical source offset:
+
+```text
+data_offset + y * (width + 1) + x
+```
+
+The format is intentionally extensible through future metadata records, including possible layer-specific records, but version 1.0 does not define them. Sparse coordinate-record data is deferred.
+
+No parser/source-reader implementing this contract exists yet.
+
 ## 8. Placement
 
 `Placement<CoordT>` is a small live value:
@@ -312,7 +336,7 @@ Map request
     -> Cache::fill<LayerT>()
 ```
 
-Neither the authored source-to-byte mapping nor the procedural/default fallback API is currently defined strongly enough to implement that path honestly. Do not invent either inside `Map::value()` merely to make the method compile.
+The dense authored source-to-byte mapping is now defined by `LAYER_SOURCE_FORMAT.md`. What remains before this path can be implemented honestly is code to parse/address that source format, the world/Placement-to-Patch-local transform path, and the procedural/default fallback contract. Do not invent those inside `Map::value()` merely to make the method compile.
 
 ### Per-layer resolution
 
@@ -467,15 +491,16 @@ Treat these as separate reviewable changes.
 
 ## 20. Next implementation slice
 
-The Map constructor and storage dependency are now concrete enough for ordinary instantiation, but residency population still has two missing contracts.
+The authored source file layout is now pinned, while its reader, coordinate transform path, and procedural/default fallback remain to be implemented or defined.
 
 The recommended order is:
 
-1. pin the authored source/layer/spatial-coordinate → byte-offset mapping and the procedural/default fallback contract required to fill a missing layer Chunk;
-2. implement checked `value<LayerT>()` / residency using those explicit contracts;
-3. implement checked `at()` by ensuring required layers then calling `Cache::tile()`;
-4. pin overlap/precedence semantics with tests as source resolution becomes concrete;
-5. add replacement/write-back policy only after the no-eviction path is proven;
-6. introduce `Region` only when a simulation needs it.
+1. implement and test a small parser/addressing helper for dense version 1.0 layer sources;
+2. pin the procedural/default fallback contract and Placement-to-Patch-local transform needed by Map resolution;
+3. implement checked `value<LayerT>()` / residency using those explicit contracts;
+4. implement checked `at()` by ensuring required layers then calling `Cache::tile()`;
+5. pin overlap/precedence semantics with tests as source resolution becomes concrete;
+6. add replacement/write-back policy only after the no-eviction path is proven;
+7. introduce `Region` only when a simulation needs it.
 
-Do not create a placeholder object merely to stand in for either missing contract.
+Do not create placeholder objects merely to stand in for missing contracts.
