@@ -13,7 +13,7 @@ if (tile[Fire] == 0)
 }
 ```
 
-The caller deals with `Map`, `Tile`, and, for larger operations, `Region`.
+The caller deals with `Map` and `Tile`, and, for larger operations, with the intended `Region` concept.
 
 It does **not** deal with the cache, storage layout, chunks, or layer-oriented I/O.
 
@@ -64,6 +64,8 @@ Tile b = a;
 Both values describe the same map position and initially contain the same property values.
 
 There is no hidden reference back into `Map` or the cache.
+
+Modifying a tile modifies only that local copy; the Map and the cache remain unchanged.
 
 ### Tile is a value type
 
@@ -216,21 +218,19 @@ It has no cache, storage, simulation, or residency semantics.
 
 ## Region
 
-A `Region` is a world-level working area requested by a game system or simulation.
+`Region` is an intended game/simulation working-area concept, not a currently implemented API.
+
+There is no `Region` type or `Map::region()` in the source yet, and its final form is deliberately left open. The concept remains part of the intended architecture.
+
+Once implemented, a `Region` would describe a world-level working area requested by a game system or simulation.
 
 For example, the fire simulation might operate on a `16 x 8` region.
 
-Conceptually:
-
-```cpp
-Region region = map.region(...);
-```
-
 Its role is:
 
-> A Region is an area of tile-oriented world state used by an algorithm.
+> A Region is an area of world state used by an algorithm.
 
-Regions are allowed to have whatever dimensions are useful to that algorithm.
+Regions would be allowed to have whatever dimensions are useful to that algorithm.
 
 A fire simulation may request:
 
@@ -250,7 +250,7 @@ The simulation should not know or care.
 
 ## Layers
 
-Persistent or source data is organised by property/layer before entering the cache.
+World data is organised by property/layer.
 
 For example:
 
@@ -262,29 +262,37 @@ Water layer
 Fire layer
 ```
 
-This is useful for storage because each property may be:
+This organisation starts in the stored and procedural sources, where each property may be:
 
 - stored independently;
 - generated independently;
 - compressed differently;
 - fetched independently.
 
-However:
+And it continues through the cache:
 
-> **Layer organisation ends at cache ingress.**
+> **Layer organisation does not end at cache ingress.**
 
-The resident representation is tile-oriented.
+The resident representation is layer-oriented: the Cache preserves layer organisation internally, and Tile is assembled only at the presentation boundary.
 
-The transition is:
+The flow is:
 
 ```text
-layer-oriented stored data
+stored/authored/procedural layer sources
+        |
+        v
+ layer-oriented Chunks
         |
         v
       Cache
+ layer-oriented resident planes
+        |
+        | pack values for one coordinate
+        v
+      Tile
         |
         v
-tile-oriented resident data
+     caller
 ```
 
 A compile-time property descriptor such as `Fire` may participate on both sides, but this does not mean that `tile[Fire]` performs layer resolution.
@@ -297,7 +305,9 @@ It is not Landor's generic term for a rectangular portion of the world.
 
 A Chunk exists because of storage and cache organisation.
 
-A Chunk represents an aligned square portion of **one stored layer** used for I/O.
+A Chunk represents an aligned square portion of **one layer**, used for cache residency and I/O.
+
+Which backing source supplies a layer is a separate resolution concern; a Chunk does not bind its layer to one particular source.
 
 For the same spatial area, these are separate chunks:
 
@@ -308,11 +318,11 @@ Water Chunk
 Fire Chunk
 ```
 
-If a cache fill needs five properties, it may therefore require five layer-oriented chunk reads.
+If a cache fill needs five properties, it may therefore require five layer Chunks for the same spatial area.
 
 ## Cache chunk size
 
-The cache has a configured canonical chunk size.
+The cache has a canonical chunk size, fixed for the Cache type.
 
 For example:
 
@@ -337,9 +347,9 @@ If an algorithm needs only an `8 x 8` Region, the cache may still need the conta
 +--------------------------------+
 ```
 
-If that cache area is resident, no I/O is necessary.
+If the required layer planes are resident there, no I/O is necessary.
 
-If it is absent, the cache fetches the corresponding canonical Chunk for each required stored layer.
+If a layer plane is missing, the cache obtains the corresponding canonical Chunk for that layer and installs the values in the slot's layer plane.
 
 This deliberately trades modest over-fetching for:
 
@@ -394,10 +404,9 @@ Tile tile = cache.at(23, 14);
 
 `Map::at()` hides whether the requested tile:
 
-- was already resident;
-- required one or more Chunk reads;
-- caused cache replacement;
-- was freshly materialised from stored layer data.
+- was already fully resident;
+- required one or more missing layer Chunks to be resolved and filled;
+- was assembled from resident layer values.
 
 Conceptually:
 
@@ -410,46 +419,72 @@ check map coordinates
       v
 find containing cache area
       |
-      +---- resident ----> copy Tile
+      v
+ensure required layer planes are resident
       |
-      `---- missing
+      +---- layer already resident
+      |
+      `---- layer missing
               |
               v
-        determine required
-        layer Chunks
+        resolve/fetch layer Chunk
               |
               v
-           Storage
-              |
-              v
-        populate cached Tiles
-              |
-              v
-           copy Tile
-              |
-              v
-            caller
+        fill corresponding layer plane
+      |
+      v
+pack one Tile from resident layer values
+      |
+      v
+caller
 ```
+
+### Capacity and replacement
+
+Cache capacity counts **spatial slots**, not individual layer chunks. One slot covers one canonical cache area and holds one layer plane per supported layer, each plane independently resident.
+
+The current implementation has:
+
+- no replacement policy;
+- no eviction policy;
+- no dirty/write-back policy.
+
+When every spatial slot is occupied, filling a new spatial area fails rather than evicting existing state. Filling a missing layer in an already-present slot can still succeed, because it reuses the slot.
 
 ## Cache representation
 
-The resident cache is tile-oriented.
+The resident cache is layer-oriented.
 
-Conceptually:
+It does not reorganise the resident world into an array of Tiles. Instead, each cache spatial slot holds one resident plane per supported layer:
 
 ```text
-+----------+----------+----------+
-| Tile     | Tile     | Tile     |
-| Ground   | Ground   | Ground   |
-| Height   | Height   | Height   |
-| Water    | Water    | Water    |
-| Fire     | Fire     | Fire     |
-+----------+----------+----------+
+Spatial slot: origin (32, 64)
+
+Ground plane:  resident
+Height plane:  resident
+Water plane:   missing
+Fire plane:    resident
+```
+
+Each layer plane is independently resident. A missing layer for an already-present spatial slot can be filled without allocating another spatial slot.
+
+The cache does not store authoritative Tile objects. When a complete Tile is requested, `Cache::tile(position)` constructs a fresh value by selecting one value from each resident layer plane at that coordinate:
+
+```text
+resident Ground plane
+resident Height plane
+resident Water plane
+resident Fire plane
+        |
+        | select one value from each plane
+        | for coordinate (x, y)
+        v
+      Tile
 ```
 
 This matches how simulations normally consume data: several properties belonging to the same position are used together.
 
-The tile stored in the cache should therefore be very close, or identical in value representation, to the `Tile` returned by `Map::at()`.
+The returned Tile owns its values. Mutating the returned Tile does not mutate the cache.
 
 ## Checked Map access
 
@@ -473,8 +508,7 @@ Unlike an ordinary in-memory array lookup, a Map access may involve:
 - Chunk selection;
 - several layer reads;
 - storage I/O;
-- cache replacement;
-- tile materialisation.
+- tile assembly.
 
 The cost of a bounds check is negligible beside those operations.
 
@@ -541,7 +575,7 @@ PUBLIC / GAME-SIDE CONCEPTS
 
 Map
 Tile
-Region
+Region (intended, not yet implemented)
 Area
 
 --------------------------------
@@ -608,7 +642,7 @@ The cost is insignificant compared with the possible cache and storage work unde
 
 ### Region is algorithmic
 
-A `Region` describes the world extent on which an algorithm wants to operate.
+The intended `Region` describes the world extent on which an algorithm wants to operate.
 
 Its dimensions are chosen for the algorithm, not for storage.
 
@@ -624,11 +658,11 @@ The cache exists solely to make residency and I/O efficient.
 
 It must not leak into normal game code.
 
-### Layers end at cache ingress
+### Layers remain fundamental through cache residency
 
-Layer-oriented organisation belongs to stored/source data.
+Layer-oriented organisation belongs to the stored, authored and procedural sources, and it does not end at cache ingress.
 
-Resident state is tile-oriented.
+Resident state is layer-oriented: the cache holds one plane per layer, and Tile is assembled only at the Map/Cache presentation boundary.
 
 ### Properties precede simulations
 
