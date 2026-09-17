@@ -1,6 +1,6 @@
 # Landor formatting — encodes coding_style.md §2-§3.
-# Declaration braces (namespace/class/struct/function) on their own line, control
-# blocks attached; 4 spaces, never tabs; 100 columns preferred, 120 tolerated by review.
+# Declaration (namespace/class/struct/function) and control-flow (if/else, loops, etc.)
+# braces on their own line; 4 spaces, never tabs; 100 columns preferred, 120 tolerated by review.
 ---
 Language: Cpp
 Standard: c++20
@@ -25,9 +25,9 @@ BraceWrapping:
   AfterUnion: true
   AfterExternBlock: true
   AfterCaseLabel: false
-  AfterControlStatement: Never
+  AfterControlStatement: Always
   BeforeCatch: false
-  BeforeElse: false
+  BeforeElse: true
   BeforeLambdaBody: false
   IndentBraces: false
   SplitEmptyFunction: false
