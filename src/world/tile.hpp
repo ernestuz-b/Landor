@@ -1,121 +1,156 @@
 #pragma once
 
+#include "coord.hpp"
 #include "layer.hpp"
 
-#include <tuple>
-#include <utility>
+#include <array>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <type_traits>
 
 
 namespace landor::geo
 {
 
-/**
- * Associates a value with the Layer whose value it represents.
- *
- * The layer identity is part of the type. This matters because unrelated
- * layers may use the same value_type.
- *
- * LayerValue is mainly useful when constructing a Tile:
- *
- *     Tile<Terrain, Elevation, Fire> {
- *         LayerValue<Terrain>   { terrain },
- *         LayerValue<Elevation> { elevation },
- *         LayerValue<Fire>      { fire }
- *     };
- */
-template<Layer LayerT>
-struct LayerValue
+namespace detail
 {
-    using layer_type = LayerT;
-    using value_type = typename LayerT::value_type;
 
-    value_type value;
-};
+template<typename Needle, typename... Haystack>
+consteval std::size_t layer_index() noexcept
+{
+    constexpr std::array<bool, sizeof...(Haystack)> matches {
+        std::same_as<Needle, Haystack>...
+    };
+
+    for (std::size_t i = 0; i < matches.size(); ++i)
+    {
+        if (matches[i])
+            return i;
+    }
+
+    return matches.size();
+}
+
+} // namespace detail
 
 
 /**
- * The synthetic value of one Map coordinate.
+ * Compact value representing one Map coordinate.
  *
- * Tile is not part of the stored representation of a Map. Map data remains
- * layer-oriented all the way down to authored patches, procedural sources,
- * live simulation state, caches and mass storage.
+ * Tile is deliberately a value type. It owns a copy of the values visible at
+ * its coordinate and contains no pointer, reference or handle into Map, Cache,
+ * Storage or the managed heap.
  *
- * A Tile is assembled only when somebody asks the Map what exists at one
- * coordinate:
+ * The layer set is a build-time property. The current representation assumes
+ * one byte per layer and packs the values into a dense array. That storage is
+ * private on purpose: if a future layer needs a wider value, Tile's internal
+ * representation may change without changing the public tile[layer] API.
  *
- *     auto tile = map.at(position);
+ * Layer semantics remain intact. tile[Fire] means "the Fire value already
+ * packed into this Tile"; it does not perform a Map, Cache or Storage lookup.
  *
- * Map resolves each layer independently and copies the resulting values into
- * the Tile. The Tile therefore owns its values and contains no references,
- * pointers or resolved addresses into map storage or the managed heap.
+ * A concrete layer intended for operator[] use is expected to be an empty
+ * compile-time tag object, for example:
  *
- * This is particularly important because the sources of two values in the
- * same Tile may be completely different. At one coordinate, for example:
+ *     struct FireLayer {
+ *         static constexpr LayerId id = ...;
+ *         using value_type = std::uint8_t;
+ *     };
  *
- *     Terrain    may come from an authored palace Patch;
- *     Elevation  may come from the same Patch;
- *     Moisture   may come from procedural generation;
- *     Fire       may come from materialised simulation state;
- *     Wind       may be derived from the world seed and current step.
+ *     inline constexpr FireLayer Fire {};
  *
- * None of those differences are visible to the consumer of the Tile.
- *
- * The Layers template arguments are the layer kinds understood by this build,
- * not the layers supplied by a particular Patch. A Patch which provides no
- * Fire data does not remove Fire from the Tile. Map still resolves Fire from
- * its fallback/default/live source.
- *
- * For example, an underwater Patch may provide no authored Fire layer:
- *
- *     patch.provides<Fire>() == false
- *
- * while:
- *
- *     map.at(position).get<Fire>()
- *
- * remains perfectly meaningful. Its initial value may be "no fire"; an arcane
- * spell may subsequently create fire there, and the fire simulation may then
- * extinguish it because the position is underwater.
- *
- * Construction requires one LayerValue for every layer. This is deliberate:
- * Map must not accidentally return a partially assembled Tile merely because
- * one of its sources was absent.
- *
- * Tile is a value. Modifying a Tile does not modify the Map. Authoritative
- * world changes must go through the Map's mutation interface.
+ *     Tile tile = map.at(position);
+ *     if (tile[Fire] == 0) { ... }
  */
-template<Layer... Layers>
+template<typename CoordT, Layer... Layers>
 class Tile
 {
 public:
-    constexpr explicit Tile(LayerValue<Layers>... values)
-        : m_values(std::move(values)...)
+    using coord_type    = CoordT;
+    using property_type = std::uint8_t;
+
+    static constexpr std::size_t property_count = sizeof...(Layers);
+
+    // Current compact representation. This assertion is intentionally local to
+    // Tile: widening a layer should require changing Tile's private packing,
+    // not the Map/Tile public API.
+    static_assert(
+        (std::same_as<typename Layers::value_type, property_type> && ...),
+        "Current Tile packing requires byte-sized layer values");
+
+    constexpr Tile() noexcept = default;
+
+    constexpr Tile(
+        coord_type position,
+        std::array<property_type, property_count> properties) noexcept
+        : m_position(position),
+          m_properties(properties)
     {
     }
 
+    [[nodiscard]] constexpr coord_type position() const noexcept
+    {
+        return m_position;
+    }
 
     /**
-     * Return the value of one layer in this Tile.
+     * Symbolic property access.
      *
-     * LayerT must be one of the layer types with which this Tile was declared.
+     * The tag type must be one of the Layers carried by this Tile.
      */
     template<Layer LayerT>
-    [[nodiscard]] constexpr typename LayerT::value_type& get() noexcept
+        requires (std::same_as<LayerT, Layers> || ...)
+    [[nodiscard]] constexpr typename LayerT::value_type&
+    operator[](LayerT) noexcept
     {
-        return std::get<LayerValue<LayerT>>(m_values).value;
+        constexpr auto index = detail::layer_index<LayerT, Layers...>();
+        static_assert(index < property_count);
+
+        return m_properties[index];
     }
 
+    template<Layer LayerT>
+        requires (std::same_as<LayerT, Layers> || ...)
+    [[nodiscard]] constexpr const typename LayerT::value_type&
+    operator[](LayerT) const noexcept
+    {
+        constexpr auto index = detail::layer_index<LayerT, Layers...>();
+        static_assert(index < property_count);
+
+        return m_properties[index];
+    }
+
+    /**
+     * Typed access retained for generic code that has the layer as a type
+     * rather than as a tag object.
+     */
+    template<Layer LayerT>
+        requires (std::same_as<LayerT, Layers> || ...)
+    [[nodiscard]] constexpr typename LayerT::value_type& get() noexcept
+    {
+        constexpr auto index = detail::layer_index<LayerT, Layers...>();
+        static_assert(index < property_count);
+
+        return m_properties[index];
+    }
 
     template<Layer LayerT>
+        requires (std::same_as<LayerT, Layers> || ...)
     [[nodiscard]] constexpr const typename LayerT::value_type&
     get() const noexcept
     {
-        return std::get<LayerValue<LayerT>>(m_values).value;
+        constexpr auto index = detail::layer_index<LayerT, Layers...>();
+        static_assert(index < property_count);
+
+        return m_properties[index];
     }
 
+    [[nodiscard]] constexpr bool operator==(const Tile&) const noexcept = default;
 
 private:
-    std::tuple<LayerValue<Layers>...> m_values;
+    coord_type m_position {};
+    std::array<property_type, property_count> m_properties {};
 };
 
 
