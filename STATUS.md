@@ -5,13 +5,19 @@ This file describes **what exists now**, not the final architecture.
 Source baseline reviewed before this update:
 
 ```text
-93e3618d4a645728c7762c825c8b3e5c094d394d
-world: connect Map to selected Storage
+5614eaa2cd0eeac6e5331dbf9391cba10a1ac32b
+docs: define dense layer source format
 ```
 
 For intended architecture, read `dev-docs/DESIGN_STATE.md`,
 `dev-docs/DESIGN_DECISIONS.md`, and, for mapping specifically,
 `dev-docs/MAPPING_MODEL.md`.
+
+The authored layer file contract is defined in:
+
+```text
+dev-docs/LAYER_SOURCE_FORMAT.md
+```
 
 ## Current repository state
 
@@ -167,7 +173,7 @@ Its current header is aligned to the new Cache model:
 - the Storage dependency is the build-selected `landor::storage::Storage` alias (currently `StorageFilesystem`);
 - Map no longer carries a placeholder `Generator&`; procedural/default fallback remains an intentionally undefined resolution seam until concrete requirements pin its contract.
 
-The actual Map resolution/population methods are still pending implementation. In particular, the repository has not yet completed the path from Patch/Placement/source resolution through Storage and procedural/default fallback into `Cache::fill()`.
+The actual Map resolution/population methods are still pending implementation. The authored dense layer source layout is now defined, but the repository has not yet implemented its parser/reader nor the full Patch/Placement resolution path into `Cache::fill()`.
 
 ## Authored-world contracts
 
@@ -176,6 +182,24 @@ The actual Map resolution/population methods are still pending implementation. I
 An immutable reusable authored region containing identity, authored geometry, and zero or more `LayerBinding { LayerId, storage::SourceId }` entries.
 
 Missing authored data for a layer is represented by absence of a binding, not by unsupported capability.
+
+### Authored layer source files
+
+`dev-docs/LAYER_SOURCE_FORMAT.md` now pins the initial on-disk source format.
+
+Version 1.0 uses:
+
+- filename convention `<PatchName>.<LayerName>.layer`;
+- LF-only (`0x0A`) line endings;
+- line-oriented metadata terminated by the first empty line (`0x0A 0x0A`);
+- core `V`, `D`, and `P` metadata records for version, dimensions, and natural position;
+- decimal or `0x`-prefixed hexadecimal integer metadata;
+- dense row-major one-byte cells after the metadata block;
+- exactly `width` cell bytes plus one LF per row, for exactly `height` rows;
+- ASCII space (`0x20`) as “no authored contribution” rather than runtime zero;
+- direct Patch-local addressing through `data_offset + y * (width + 1) + x`.
+
+Metadata remains extensible; future layer-specific records are explicitly possible but not defined yet. Sparse coordinate-record data is also deferred rather than included in version 1.0.
 
 ### `landor::geo::Placement`
 
@@ -255,8 +279,9 @@ The newer tests mirror the source tree, while the older geometry tests still liv
 
 The following are not implemented and should not be invented as collateral work:
 
+- parser/reader for `dev-docs/LAYER_SOURCE_FORMAT.md`;
+- world/Placement coordinates to Patch-local source-coordinate transformation;
 - final Map layer precedence once `Map::resolve()` is implemented;
-- source/layer/spatial-coordinate to byte-offset mapping where not already specified by source format;
 - procedural/default fallback contract used by Map resolution;
 - cache replacement policy;
 - dirty-state representation;
@@ -269,12 +294,13 @@ The following are not implemented and should not be invented as collateral work:
 
 A sensible next sequence from the current tree is:
 
-1. pin the source-to-byte mapping and procedural/default fallback contract required to populate a missing layer Chunk, rather than inventing either inside `Map::value()`;
-2. implement and test the smallest checked `Map::value<LayerT>()` → Cache residency/population slice using those explicit contracts;
-3. implement checked `Map::at()` by ensuring required layers and then packing through Cache;
-4. pin per-layer overlap/precedence behaviour with tests as `Map::resolve()` becomes real;
-5. add replacement/write-back policy only after the fixed-capacity no-eviction path is working;
-6. introduce `Region` only when a simulation needs an algorithmic working-area API;
-7. separately finish mechanical policy alignment in CMake, enum spelling, and test layout.
+1. implement and test the smallest parser/addressing helper for the dense version 1.0 authored layer source format;
+2. pin the procedural/default fallback contract and the Placement-to-Patch-local transform required for Map resolution;
+3. implement and test the smallest checked `Map::value<LayerT>()` → Cache residency/population slice using those explicit contracts;
+4. implement checked `Map::at()` by ensuring required layers and then packing through Cache;
+5. pin per-layer overlap/precedence behaviour with tests as `Map::resolve()` becomes real;
+6. add replacement/write-back policy only after the fixed-capacity no-eviction path is working;
+7. introduce `Region` only when a simulation needs an algorithmic working-area API;
+8. separately finish mechanical policy alignment in CMake, enum spelling, and test layout.
 
 Keep each step small and independently testable.
