@@ -5,11 +5,13 @@ project(Landor LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# The world layer is currently header-only design contracts, so the only
-# translation unit is main.cpp. Headers are listed for IDE visibility; a future
-# implementation file must be added here explicitly to be compiled.
+# The world layer is still header-only design contracts; the only implementation
+# translation units are main.cpp and the build-selected storage backend. Headers
+# are listed for IDE visibility; a future implementation file must be added here
+# explicitly to be compiled.
 add_executable(Landor
     main.cpp
+    src/platform/storage/storage_filesystem.cpp
 
     src/storage/types.hpp
 
@@ -28,6 +30,7 @@ add_executable(Landor
     src/storage/storage_contract.hpp
     src/platform/storage/storage_filesystem.hpp
 )
+target_include_directories(Landor PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 include(GNUInstallDirs)
 install(TARGETS Landor
@@ -83,10 +86,16 @@ if(LANDOR_BUILD_TESTS)
         tests/test_area.cpp
         tests/test_coord.cpp
 
+        # Storage backend under test.
+        src/platform/storage/storage_filesystem.cpp
+
         # Behavioural tests mirroring src/world/.
         tests/world/test_tile.cpp
         tests/world/test_chunk.cpp
         tests/world/test_cache.cpp
+
+        # Behavioural tests mirroring src/platform/storage/.
+        tests/platform/storage/test_storage_filesystem.cpp
     )
     target_include_directories(landor_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_link_libraries(landor_tests PRIVATE GTest::gtest_main)
