@@ -2,35 +2,27 @@
 
 This file describes the current intended architecture.
 
-It replaces older architectural descriptions that treated the world as a stored tile grid,
-compressed terrain map or single hand-authored valley.
+It replaces older architectural descriptions that treated the world as a stored tile grid, compressed terrain map, or single hand-authored valley.
 
-For implementation reality, consult `../STATUS.md` and the source tree. If source and this
-document disagree, report the mismatch: source tells you what exists, this file tells you
-where the design is going.
+For implementation reality, consult `../STATUS.md` and the source tree. For the detailed mapping model, consult `MAPPING_MODEL.md`.
+
+If source and this document disagree, report the mismatch: source tells you what exists, this file tells you where the design is going.
 
 ## 1. Project identity
 
 Landor is an exploration and simulation game with an educational purpose.
 
-The simulation is not background decoration. It is intended to be the substrate of the
-game: weather, fire, water, plants, animals, people, settlements, ownership, schedules and
-economy can become gameplay because they share one world model.
+The simulation is not background decoration. It is intended to be the substrate of the game: weather, fire, water, plants, animals, people, settlements, ownership, schedules and economy can become gameplay because they share one world model.
 
-The tone is "fantastic realism": unusual things may be introduced by game mechanics, but
-ordinary world systems still apply. A magical fire may appear underwater; that does not
-require the map representation to forbid it. The fire/water simulation decides what
-happens next.
+The tone is "fantastic realism": unusual things may be introduced by game mechanics, but ordinary world systems still apply. A magical fire may appear underwater; that does not require the map representation to forbid it. The fire/water simulation decides what happens next.
 
-The first renderer is UTF-8/text. Later renderers may be graphical. Rendering must not
-become the owner of world semantics.
+The first renderer is UTF-8/text. Later renderers may be graphical. Rendering must not become the owner of world semantics.
 
 ## 2. Target philosophy
 
 Landor targets Linux-class systems and small microcontrollers.
 
-The same project should be able to scale down to Raspberry Pi Pico/RP2040 and STM32-class
-hardware without turning the desktop version into embedded-style spaghetti.
+The same project should be able to scale down to Raspberry Pi Pico/RP2040 and STM32-class hardware without turning the desktop version into embedded-style spaghetti.
 
 Ports may differ in:
 
@@ -41,19 +33,15 @@ Ports may differ in:
 - memory capacities;
 - some game content.
 
-They should share formats and architectural ideas where practical. Behavioural identity
-across every target is not required.
+They should share formats and architectural ideas where practical. Behavioural identity across every target is not required.
 
-Landor avoids unnecessary embedded OSS/framework dependencies. Straightforward
-infrastructure that can be implemented compactly and audited locally should remain local.
+Landor avoids unnecessary embedded OSS/framework dependencies. Straightforward infrastructure that can be implemented compactly and audited locally should remain local.
 
 ## 3. C++ and portability
 
 Landor is C++23.
 
-The portable contract is not "every C++23 library facility exists on every compiler".
-A facility becomes part of portable Landor once the supported embedded toolchains provide
-the subset Landor uses.
+The portable contract is not "every C++23 library facility exists on every compiler". A facility becomes part of portable Landor once the supported embedded toolchains provide the subset Landor uses.
 
 Modern C++ is encouraged where it makes contracts clearer:
 
@@ -72,15 +60,13 @@ There are no exceptions in Landor code.
 
 There is no RTTI-based design: no `dynamic_cast`, no `typeid`.
 
-`noexcept` is used semantically where a function promises not to throw; it is not
-mechanically added to every declaration.
+`noexcept` is used semantically where a function promises not to throw; it is not mechanically added to every declaration.
 
 ## 4. World directory and namespaces
 
 Filesystem layout and namespaces are separate decisions.
 
-`src/world/` is the physical home of world/environment machinery. Types in that directory
-may belong to `landor::geo`, `landor::world` or another appropriate namespace.
+`src/world/` is the physical home of world/environment machinery. Types in that directory may belong to `landor::geo`, `landor::world` or another appropriate namespace.
 
 Do not reorganize directories merely to mirror namespaces.
 
@@ -112,10 +98,9 @@ Those belong to the systems that provide or mutate values.
 
 This is a central invariant.
 
-A patch with no Fire binding does not mean Fire is impossible at that coordinate. It means
-only that the patch contributes no authored Fire value there.
+A Patch with no Fire binding does not mean Fire is impossible at that coordinate. It means only that the Patch contributes no authored Fire value there.
 
-The map may obtain the Fire value from:
+The Map may obtain the Fire value from:
 
 - materialized working state;
 - another authored contribution;
@@ -124,24 +109,73 @@ The map may obtain the Fire value from:
 
 This keeps map representation permissive while simulation enforces physical/game rules.
 
-### 5.3 Tile is synthetic
+### 5.3 Tile is a compact presentation value
 
-A `Tile<Layers...>` is a short-lived owned value assembled for one coordinate.
+A `Tile<CoordT, Layers...>` is an owned value representing one coordinate.
 
-It contains copies of the values for all layers supported by that map/build.
+It contains:
 
-A tile contains no:
+- the coordinate itself;
+- copies of the values for all layers supported by that Map/build.
 
-- reference into patch data;
-- pointer into cache storage;
+A Tile contains no:
+
+- reference into Patch data;
+- pointer into Cache storage;
 - managed-heap address;
-- storage handle.
+- Storage handle;
+- back-pointer into Map.
 
-Changing a returned tile does not mutate the map.
+Changing a returned Tile does not mutate the Map.
 
-There is no authoritative array of complete tiles.
+`tile[Fire]` is symbolic access to the Fire value already packed into that Tile. It does not perform a Map, Cache, or Storage lookup.
 
-A cache of assembled tiles is allowed only as disposable derived state.
+The exact private packing is intentionally not part of the public contract. A future wider layer can change Tile's internal representation without changing the caller-facing `tile[layer]` API.
+
+There is no authoritative array of complete Tiles.
+
+### 5.4 Chunk is one-layer cache/I/O geometry
+
+A `Chunk` is an aligned square portion of **one layer** used by Cache and I/O machinery.
+
+Chunk is not the generic world-algorithm rectangle. `Area` remains pure geometry, while `Region` is the intended future simulation/game working-area concept.
+
+Chunk contains spatial/layer identity, not backing-source identity. Which `SourceId` or procedural/default source supplies a layer is resolved separately by Map.
+
+### 5.5 Cache remains layer-oriented
+
+Cache is private Map machinery and preserves layer organisation internally.
+
+It does not reorganise resident state into an array of Tiles.
+
+The intended resident shape is conceptually:
+
+```text
+spatial slot
+    Ground plane
+    Height plane
+    Water plane
+    Fire plane
+    ...
+```
+
+Each layer plane is independently resident.
+
+Cache capacity counts spatial slots. The Cache has a canonical two-dimensional Chunk side used for residency/fill decisions.
+
+When a caller requests a Tile, Map ensures the required layer planes are resident and Cache packs one value from each layer at that coordinate into a fresh Tile.
+
+The current first Cache implementation deliberately has no replacement or write-back policy. Full capacity causes a new-area fill to fail rather than silently inventing eviction semantics.
+
+### 5.6 Region is algorithmic, not storage-shaped
+
+`Region` is an intended higher-level working-area concept for simulations/game systems.
+
+Its dimensions are chosen for the algorithm, not for Cache layout.
+
+For example, a fire simulation may want a `16 x 8` Region while Cache residency uses aligned `32 x 32` Chunks. The simulation should not know or care about the Cache granularity.
+
+The exact Region ownership/view/mutation API remains open until a concrete simulation needs it.
 
 ## 6. Authored content and live geography
 
@@ -159,8 +193,7 @@ It contains:
 
 A `LayerBinding` connects one authored layer to one logical `storage::SourceId`.
 
-Patch does not know whether the source is a host file, SD-card file, flash, ROM or raw
-NAND.
+Patch does not know whether the source is a host file, SD-card file, flash, ROM or raw NAND.
 
 Patch owns no live placement state.
 
@@ -181,17 +214,15 @@ Transform order is:
 reflection -> rotation -> translation
 ```
 
-Several placements may reuse one patch.
+Several Placements may reuse one Patch.
 
-Mutation of a placement goes through the owning `Map` so derived spatial caches can be
-invalidated correctly.
+Mutation of a Placement goes through the owning Map so affected cached layer data can be invalidated correctly.
 
 ### 6.3 PatchSet
 
 A `PatchSet` is an immutable composition recipe.
 
-A recipe contains named/id'd roles. Each role provides candidate patches and a minimum and
-maximum count.
+A recipe contains named/id'd roles. Each role provides candidate Patches and a minimum and maximum count.
 
 Example home roles:
 
@@ -205,39 +236,37 @@ unique feature
 
 `PatchSet` does not implement the composition algorithm. Composition policy is separate.
 
-Given the same deterministic inputs, composition should reproduce the same untouched
-baseline.
+Given the same deterministic inputs, composition should reproduce the same untouched baseline.
 
 ### 6.4 Place
 
 A `Place` is narrative identity, not geometry.
 
-Schedules, ownership, dialogue, missions and actors can refer to a stable `PlaceId` such as
-"the player's home" or "GoodMagePalace" without depending on which patches implement it.
+Schedules, ownership, dialogue, missions and actors can refer to a stable `PlaceId` such as "the player's home" or "GoodMagePalace" without depending on which Patches implement it.
 
-A place may refer to one or more `PlacementId`s.
+A Place may refer to one or more `PlacementId`s.
 
-A place owns no map data and performs no spatial queries.
+A Place owns no map data and performs no spatial queries.
 
 ## 7. Map
 
 `Map` is the logical spatial surface of one region of the world.
 
-A map is not an authored file and is not a rectangular stored `Tile` array.
+A Map is not an authored file and is not a rectangular stored Tile array.
 
-The map:
+The Map:
 
-- owns live placements;
-- refers to immutable authored patch descriptors;
+- owns live Placements;
+- refers to immutable authored Patch descriptors;
 - resolves each supported layer independently;
 - combines authored, procedural/default and materialized working state;
-- returns synthetic tile values;
-- owns/integrates any disposable spatial cache needed to accelerate those answers.
+- owns/integrates a bounded layer-oriented Cache;
+- returns compact Tile values assembled from resident layer state;
+- presents checked public world access.
 
-Overlap resolution is per-layer. A placement that supplies no value for one layer does not
-hide a lower-priority contribution to that layer.
+Overlap resolution is per-layer. A Placement that supplies no value for one layer does not hide a lower-priority contribution to that layer.
 
-The exact precedence rule belongs in `Map`, not in `Patch`.
+The exact precedence rule belongs in Map, not in Patch.
 
 The intended conceptual resolution order is:
 
@@ -249,18 +278,19 @@ materialized/working override
 
 The precise rule must be pinned by tests when implemented.
 
+The next implementation seam is to connect missing Cache layer Chunks to that source-resolution path without inventing a storage format not already defined by repository contracts.
+
 ## 8. Simulation and mutation
 
 Simulation works on world/layer state, not renderer objects.
 
-The map may temporarily represent combinations that simulation will rapidly resolve. This
-is intentional.
+The Map may temporarily represent combinations that simulation will rapidly resolve. This is intentional.
 
-World mutations should have a small number of explicit front doors so cache invalidation,
-persistence and deterministic replay are not bypassed.
+World mutations should have a small number of explicit front doors so Cache invalidation, persistence and deterministic replay are not bypassed.
 
-The exact mutation API is still open and should be introduced by concrete simulation
-requirements rather than by speculative framework design.
+A Tile returned by value is not a live proxy into the world. Mutating the Tile changes only the local copy.
+
+The exact mutation API is still open and should be introduced by concrete simulation requirements rather than by speculative framework design.
 
 ## 9. Storage
 
@@ -274,7 +304,7 @@ Offset
 Size
 ```
 
-The platform-independent storage contract currently provides:
+The platform-independent Storage contract currently provides:
 
 ```text
 read
@@ -282,8 +312,7 @@ write
 size
 ```
 
-Reads and writes are whole-range operations: success means the requested logical range was
-fully transferred.
+Reads and writes are whole-range operations: success means the requested logical range was fully transferred.
 
 Physical representation stays below the boundary.
 
@@ -317,14 +346,13 @@ using Storage = StorageFilesystem;
 
 Common code uses `landor::storage::Storage`.
 
-Do not add a virtual storage base class merely to hide a type CMake already knows.
+Do not add a virtual Storage base class merely to hide a type CMake already knows.
 
 ### 9.3 C APIs and vendor HALs
 
 Platform code may use C APIs and vendor HALs directly where appropriate.
 
-Wrap them when Landor needs a semantic boundary, not merely to make a C handle look more
-C++-like.
+Wrap them when Landor needs a semantic boundary, not merely to make a C handle look more C++-like.
 
 ## 10. Memory and allocation
 
@@ -340,40 +368,31 @@ Prefer:
 
 If a capacity is fixed at compile time, it should normally be a template parameter.
 
-When a type has several related capacities, prefer a named structural policy:
+When a type has several related capacities, prefer a named structural policy once the positional template arguments stop being self-explanatory. For example:
 
 ```cpp
 Map<MapCapacity{
     .placements = 64,
-    .tile_cache = 16
+    .cache_slots = 16,
+    .cache_chunk_side = 32
 }>
 ```
 
-rather than:
-
-```cpp
-Map<64, 16>
-```
-
-once the positional arguments stop being self-explanatory.
+The exact policy type is illustrative; the current source still uses direct non-type template parameters.
 
 ### 10.2 Dynamic allocation
 
 Dynamic allocation is a fallback, not the default.
 
-Use the managed heap only when the lifetime/quantity is genuinely dynamic and a fixed
-capacity/value representation is not appropriate.
+Use the managed heap only when the lifetime/quantity is genuinely dynamic and a fixed capacity/value representation is not appropriate.
 
-The managed heap comes from another project. It is currently vendored under
-`include/managed_heap/` but should be treated as an imported component.
+The managed heap comes from another project. It is currently vendored under `include/managed_heap/` but should be treated as an imported component.
 
-Do not modify it casually. A defect or required feature should be handled explicitly and
-separately. Whether it eventually becomes a submodule/subrepo remains open.
+Do not modify it casually. A defect or required feature should be handled explicitly and separately. Whether it eventually becomes a submodule/subrepo remains open.
 
 ### 10.3 Standard containers
 
-Allocating STL containers are not forbidden because they are STL; they are constrained
-because allocation and pointer-stability matter.
+Allocating STL containers are not forbidden because they are STL; they are constrained because allocation and pointer-stability matter.
 
 An allocating standard container may be used when:
 
@@ -381,8 +400,7 @@ An allocating standard container may be used when:
 - its allocator semantics are explicitly satisfied;
 - the allocation is not hidden from a critical deterministic/real-time path.
 
-Do not assume the relocatable managed heap is an ordinary STL allocator. Standard
-containers generally retain pointers into their allocated blocks.
+Do not assume the relocatable managed heap is an ordinary STL allocator. Standard containers generally retain pointers into their allocated blocks.
 
 ## 11. Configuration
 
@@ -390,8 +408,7 @@ A contained application-level configuration object is acceptable.
 
 Global configuration must not become a service locator used from deep subsystems.
 
-Interpret configuration near the composition root and pass lower-level objects the exact
-value/policy they require.
+Interpret configuration near the composition root and pass lower-level objects the exact value/policy they require.
 
 Use CMake according to the nature of the choice:
 
@@ -419,8 +436,7 @@ after CMake adds the generated include directory.
 
 ### Whole implementation
 
-If the implementation is known at build time, CMake selects the source/header. Do not
-generate a runtime selector for it.
+If the implementation is known at build time, CMake selects the source/header. Do not generate a runtime selector for it.
 
 ## 12. Error handling and invariants
 
@@ -437,15 +453,13 @@ Use the simplest domain representation:
 
 Do not use `std::optional` as a generic substitute for error modelling.
 
-Do not use `std::expected::value()` as normal Landor control flow because its failure path
-is exception-oriented. Check the result explicitly.
+Do not use `std::expected::value()` as normal Landor control flow because its failure path is exception-oriented. Check the result explicitly.
 
 Broken internal state is a programming fault, not a recoverable error result.
 
 Use assertions in diagnostic builds.
 
-In production, an unrecoverable condition may simply terminate unless the platform has
-meaningful stronger semantics such as:
+In production, an unrecoverable condition may simply terminate unless the platform has meaningful stronger semantics such as:
 
 - entering a safe state;
 - retaining crash diagnostics;
@@ -459,15 +473,13 @@ Logging is cross-cutting instrumentation and may be globally reachable.
 
 It must not influence game semantics.
 
-The intended logger preserves the useful design of the older production logger while using
-modern C++ facilities.
+The intended logger preserves the useful design of the older production logger while using modern C++ facilities.
 
 ### Compile-time grades
 
 Verbose logging can be compiled away completely.
 
-The outer logging API may deliberately be a macro so a disabled log statement does not
-evaluate its arguments.
+The outer logging API may deliberately be a macro so a disabled log statement does not evaluate its arguments.
 
 ### Levels and categories
 
@@ -498,21 +510,17 @@ Simulation
 
 RAII function tracing is available at a very verbose grade.
 
-A scope helper logs entry in its constructor and exit in its destructor. Modern
-implementation can use `std::source_location` to capture function/file/line automatically.
+A scope helper logs entry in its constructor and exit in its destructor. Modern implementation can use `std::source_location` to capture function/file/line automatically.
 
-Function traces are especially valuable when an agent or developer is reconstructing a
-control-flow failure.
+Function traces are especially valuable when an agent or developer is reconstructing a control-flow failure.
 
 ### Real-time timing
 
-A diagnostic trace must preserve timing when it may be used to replay hardware or
-real-time failures.
+A diagnostic trace must preserve timing when it may be used to replay hardware or real-time failures.
 
 Use a monotonic timestamp captured at the event, before slow sink I/O.
 
-A printed record may also show the delta since the previous record, but delta is derived
-from event timestamps rather than being the only timing information.
+A printed record may also show the delta since the previous record, but delta is derived from event timestamps rather than being the only timing information.
 
 ### Serialization
 
@@ -520,25 +528,19 @@ Output records must be serialized so concurrent producers do not create unreadab
 
 Host builds may use a mutex or dedicated logging thread.
 
-Embedded builds may use a fixed-capacity single-producer/single-consumer ring with an
-interrupt- or scheduler-driven UART consumer.
+Embedded builds may use a fixed-capacity single-producer/single-consumer ring with an interrupt- or scheduler-driven UART consumer.
 
-The ring's ownership and publication rules must be valid under the C++ memory model.
-Modern SPSC code should use appropriate atomic acquire/release publication rather than
-relying only on native-word hardware atomicity.
+The ring's ownership and publication rules must be valid under the C++ memory model. Modern SPSC code should use appropriate atomic acquire/release publication rather than relying only on native-word hardware atomicity.
 
-Formatting should not require a large embedded framework. Rich host formatting may use
-standard facilities when suitable; constrained sinks may use a smaller implementation.
+Formatting should not require a large embedded framework. Rich host formatting may use standard facilities when suitable; constrained sinks may use a smaller implementation.
 
 ## 14. Dependencies
 
 Landor runtime/core code should remain independent of large third-party frameworks.
 
-Development dependencies are different: GoogleTest, GoogleMock, compilers and static
-analysis tools are normal development infrastructure.
+Development dependencies are different: GoogleTest, GoogleMock, compilers and static analysis tools are normal development infrastructure.
 
-On embedded targets, prefer local small infrastructure over importing a framework for a
-small, auditable problem.
+On embedded targets, prefer local small infrastructure over importing a framework for a small, auditable problem.
 
 ## 15. Documentation as architecture
 
@@ -556,8 +558,9 @@ Public/architectural headers should explain:
 
 Do not turn headers into chronological diaries.
 
-Important settled alternatives and their rationale belong in
-`DESIGN_DECISIONS.md`.
+Important settled alternatives and their rationale belong in `DESIGN_DECISIONS.md`.
+
+Mapping-specific details belong in `MAPPING_MODEL.md` and must remain consistent with the relevant source headers.
 
 ## 16. Open questions
 
@@ -565,9 +568,13 @@ The following remain intentionally open:
 
 - final mutation API between simulations and materialized layer state;
 - exact layer precedence/overlap semantics once `Map::resolve()` is implemented;
+- exact source/layer/spatial-coordinate to byte-range mapping where not already defined by a concrete format;
+- Cache replacement policy;
+- dirty-state/write-back policy;
+- `Region` ownership/view/mutation semantics;
 - long-term repository relationship of `include/managed_heap/` (vendored vs submodule/subrepo);
 - exact logging record representation and formatter on embedded targets;
-- concrete platform storage implementations beyond the filesystem backend;
+- concrete platform Storage implementations beyond the filesystem backend;
 - networking/multiplayer synchronization details.
 
 Do not invent answers to these merely to complete an unrelated task.
