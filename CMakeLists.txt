@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 project(Landor LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # The world layer is currently header-only design contracts, so the only
