@@ -23,8 +23,6 @@ add_executable(Landor
     src/world/patchset.hpp
     src/world/place.hpp
     src/world/map.hpp
-
-    # placeholders awaiting their interface drafts
     src/world/chunk.hpp
     src/world/cache.hpp
     src/storage/storage_contract.hpp
@@ -81,9 +79,14 @@ if(LANDOR_BUILD_TESTS)
         # Compile tripwire: every header under src/ in one translation unit.
         tests/test_world_headers.cpp
 
-        # Behavioural tests, one file per contract header.
+        # Existing behavioural tests awaiting their separate layout move.
         tests/test_area.cpp
         tests/test_coord.cpp
+
+        # Behavioural tests mirroring src/world/.
+        tests/world/test_tile.cpp
+        tests/world/test_chunk.cpp
+        tests/world/test_cache.cpp
     )
     target_include_directories(landor_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_link_libraries(landor_tests PRIVATE GTest::gtest_main)
