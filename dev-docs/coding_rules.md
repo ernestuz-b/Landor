@@ -1,268 +1,461 @@
-# Coding Rules
+# Landor Coding Rules
 
-Follow these rules when modifying this project.
+These are durable engineering rules for modifying Landor.
 
-This file defines how coding agents should work. For formatting, naming, and layout, use `coding_style.md`.
+Formatting and naming live in [`coding_style.md`](coding_style.md). Architecture lives in
+[`DESIGN_STATE.md`](DESIGN_STATE.md) and rationale in
+[`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md).
 
-## 1. Work in Small Slices
-
-Implement one small, reviewable change at a time.
+## 1. Work in small, reviewable slices
 
 Before editing:
 
-- identify the requested behavior;
-- locate the relevant files and tests;
-- check nearby code style and project rules.
+- identify the requested behaviour;
+- identify the relevant source and tests;
+- read nearby architectural comments;
+- check `../STATUS.md` for known mismatches.
 
-Do not rewrite unrelated code.
-Do not perform opportunistic refactors.
-Do not mix formatting-only changes with logic changes.
-Do not weaken tests, warnings, assertions, diagnostics, or static-analysis checks to make a patch pass.
+Do not:
 
-After editing, summarize:
+- rewrite unrelated code;
+- perform opportunistic refactors;
+- introduce abstractions for hypothetical future use;
+- mix broad formatting changes with logic changes;
+- weaken tests, warnings or diagnostics to make a patch pass.
+
+After editing, state:
 
 - what changed;
-- what was tested;
-- any known limitations.
+- why;
+- exact tests/builds run;
+- known limitations or remaining mismatches.
 
-## 2. Prefer Simple, Explicit C++
+## 2. Use modern C++ deliberately
 
-Use modern C++ when it improves safety, clarity, or compile-time checking.
+Landor is C++23.
 
-Preferred tools:
+Prefer language/library facilities that make the contract clearer:
 
-- `constexpr` / `consteval`
-- `std::array`
-- `std::span`
-- `std::optional`
-- `std::variant` when appropriate
-- concepts for API constraints
-- `enum class`
-- RAII
-- strong types or tag types
-- `[[nodiscard]]`
-- `static_assert`
+- RAII;
+- `constexpr`;
+- `consteval`;
+- concepts;
+- `std::array`;
+- `std::span`;
+- `std::expected`;
+- scoped enums;
+- `[[nodiscard]]`;
+- `static_assert`;
+- `std::source_location`;
+- named strong/policy types.
 
-Avoid clever code that hides ownership, allocation, control flow, failure modes, or generated-code cost.
+"Modern" is not permission for template acrobatics. Cleverness that hides ownership,
+allocation, generated code cost, control flow or failure semantics is a regression.
 
-## 3. Ownership and Lifetime
+## 3. No exceptions
 
-Ownership must be explicit.
+Landor code does not throw or catch exceptions.
+
+Recoverable outcomes are explicit values/result types.
+
+External development libraries such as GoogleTest/GoogleMock may use their normal
+implementation facilities; that does not make exceptions part of Landor.
+
+Do not make normal Landor control flow depend on exception-oriented accessors such as
+`std::expected::value()`.
+
+## 4. No RTTI
+
+Do not use:
+
+- `dynamic_cast`;
+- `typeid`;
+- RTTI-driven dispatch.
+
+Use build selection, templates/concepts, explicit tags/ids or runtime polymorphism according
+to when the concrete choice is known.
+
+## 5. Ownership and lifetime
+
+Ownership must be visible.
+
+Prefer:
+
+- values;
+- stack lifetime;
+- RAII;
+- stable ids/handles for relocatable/dynamic objects;
+- non-owning `std::span`/views for borrowed contiguous data.
 
 Rules:
 
-- prefer value types, stack objects, and RAII;
-- use `std::span` for non-owning array views;
-- use `std::unique_ptr` only when dynamic ownership is intentional;
-- avoid shared ownership unless genuinely required;
-- do not return references, pointers, or spans to temporaries;
-- document lifetime assumptions when storing non-owning pointers or references;
-- destructors must not throw.
+- do not return references/pointers/spans to temporaries;
+- document stored non-owning lifetime relationships;
+- resolve movable managed objects at point of use rather than caching raw addresses;
+- raw owning pointers require an explicit ownership policy.
 
-- keep a **stable identifier** distinct from a runtime storage index: identifiers may be
-  persisted, compared across runs and hashed; slot indices exist only inside one process
-  and must never reach a save file, a digest, or an NPC's long-lived memory;
-- resolve a handle to storage at the point of use rather than caching the resolved object,
-  so that storage maintenance (see `IMPLEMENTATION.md` §2.3) can move objects safely;
-- distinguish kinds by an explicit tag or id when no shared polymorphic interface is
-  needed; runtime type queries are unavailable (§13).
+`noexcept` is semantic. Use it where the function contract is genuinely non-throwing.
 
-## 4. Error Handling
+## 6. Allocation discipline
 
-Failure must be visible to the caller.
+### Fixed first
 
-Rules:
+If a useful maximum is known, prefer fixed-capacity storage.
 
-- distinguish recoverable errors from programming faults;
-- mark important result/status types `[[nodiscard]]`;
-- do not silently discard errors;
-- avoid vague boolean failures when the error kind matters;
-- use assertions for violated internal invariants, not normal runtime failures;
-- keep error paths deterministic;
-- do not continue with invalid state after failed initialization.
+If the capacity is fixed at compile time, it normally belongs in the type.
 
-Use one consistent error model inside a subsystem.
+### Managed heap
 
-## 5. Numeric Safety
+Use `include/managed_heap/` only when dynamic allocation is genuinely unavoidable.
 
-Treat numeric conversions and arithmetic as design decisions.
+It is an imported component from another project. Do not modify it as part of ordinary
+Landor cleanup or feature work. Changes require an explicit reason and separate review.
+
+Use the component through its public API and documentation.
+
+### Standard containers
+
+Allocating STL containers are allowed only when their cost and allocator semantics are
+appropriate.
+
+Do not assume the managed heap can be supplied as an STL allocator merely because it
+allocates memory. Relocation can invalidate the pointer stability expected by ordinary
+containers.
+
+Avoid hidden allocation in:
+
+- real-time paths;
+- embedded-critical paths;
+- hot inner loops;
+- error paths unless explicitly designed;
+- deterministic paths where allocation timing/capacity would affect behaviour.
+
+## 7. Compile-time capacities and policies
+
+When a value affects layout/capacity and is fixed at compile time, make it a template or
+non-type template parameter.
+
+For several related values, prefer a named structural policy:
+
+```cpp
+struct MapCapacity
+{
+    std::size_t placements;
+    std::size_t tile_cache;
+};
+
+template<MapCapacity Capacity>
+class Map;
+```
+
+Do not hide object-layout decisions behind deep global config lookups.
+
+## 8. Configuration
+
+A contained application/global configuration object is allowed.
+
+Deep subsystems must not access it directly. Interpret configuration at the composition
+root and pass the exact value/policy/object needed.
+
+CMake should use:
+
+- compile definitions for genuine build switches;
+- `configure_file()` for generated typed configuration;
+- file/source selection for whole implementations known at build time.
+
+Generated headers live under the build tree, not the source tree.
+
+## 9. Platform selection
+
+Use the least dynamic mechanism that matches reality.
+
+### Known at build time
+
+CMake selects the concrete platform file/type.
+
+Example:
+
+```cpp
+using Storage = StorageFilesystem;
+```
+
+### Known through types
+
+Use templates/concepts.
+
+### Unknown until runtime
+
+Use runtime polymorphism.
+
+Do not add a virtual interface merely to abstract a build-known implementation.
+
+Do not build platform-selector macro forests in common code.
+
+Platform code may call C/vendor HAL APIs directly when appropriate. Add a C++ wrapper only
+when Landor needs a semantic boundary.
+
+## 10. Error handling
+
+A failure is represented when the caller can meaningfully react.
+
+Use:
+
+- pointer/null for natural lookup absence;
+- bool for a simple obvious binary outcome;
+- `std::expected<T, E>` for value-or-recoverable-error;
+- named status/result structures where they communicate the domain better.
+
+Do not use `std::optional` as a generic error channel.
+
+Mark important ignored-result hazards `[[nodiscard]]`.
+
+Do not:
+
+- silently discard errors;
+- encode several distinct failures in an unexplained bool;
+- continue after failed initialization with invalid state.
+
+Keep error behaviour deterministic.
+
+## 11. Invariants and assertions
+
+Programming faults are not normal runtime failures.
+
+Assert internal invariants in diagnostic builds.
+
+Do not convert corrupted internal state into an ordinary recoverable result merely to keep
+the program running.
+
+In production, only add special fatal handling when it has meaningful semantics such as:
+
+- safe-state transition;
+- retained crash information;
+- controlled reset.
+
+Otherwise allow termination rather than inventing a decorative fatal framework.
+
+## 12. Numeric safety
+
+Treat conversions and arithmetic as design decisions.
 
 Rules:
 
 - avoid implicit narrowing;
-- validate range before converting runtime values;
+- validate runtime ranges before narrowing;
+- use C++ casts;
 - avoid casual signed/unsigned mixing;
-- document saturation, wraparound, and rounding behavior;
-- check overflow where it matters;
-- do not compare floating-point values for exact equality unless the domain guarantees it;
-- use tolerances based on scale, type, and conditioning;
-- test boundary, zero, singular, near-singular, and dimension-mismatch cases.
-- Use the sympy-math-oracle skill to validate math results and tests *(inherited tooling;
-  Landor's v0.x rules are integer-only, so it normally does not apply — it becomes
-  relevant only if a phase introduces real-valued or probabilistic math)*.
+- document wrap, saturation and rounding contracts;
+- never claim signed overflow is defined;
+- test boundary and extreme values;
+- make promotion width explicit where overflow is possible;
+- use compile-time checks when a numeric relationship is static.
 
-## 6. Allocation Discipline
+C-style casts are forbidden except at an unavoidable C/vendor boundary, and even there a
+C++ cast is preferred when practical.
 
-Hidden allocation is forbidden in deterministic paths.
+## 13. Concurrency
 
-Rules:
+Concurrent code must have explicit ownership.
 
-- prefer fixed-capacity storage when maximum size is known;
-- use caller-provided workspace for reusable scratch memory;
-- use the managed heap (`managed-heap/`, `IMPLEMENTATION.md` §2.4) as the only
-  sanctioned store for variable-length dynamic objects in `world`/`game`; no other
-  allocator or allocating container is allowed there;
-- treat `managed-heap/` as an externally supplied, frozen component: never modify
-  `managed_heap.hpp`, `SPEC.md`, `USER_GUIDE.md`, or the examples; consume the
-  public API per its user guide, and record gaps or defects for the component's
-  owner instead of patching the component;
-- make allocation visible in the API or documentation;
-- do not allocate in real-time, embedded-critical, or hot inner-loop paths unless explicitly allowed;
-- do not allocate in error paths unless the subsystem policy allows it;
-- test no-allocation guarantees where practical.
+Prefer single-writer ownership and message passing.
 
-## 7. Concurrency
+Mutexes are fine for ordinary host shared data.
 
-Concurrent code must be bounded and reviewable.
+Atomics require a documented publication/ordering reason. Do not use relaxed atomics by
+habit.
 
-Rules:
+For SPSC queues:
 
-- prefer single ownership and message passing;
-- use mutexes for ordinary shared data;
-- use atomics only with documented memory-ordering reasons;
-- do not hold locks across callbacks, blocking calls, or user code;
-- define lock ordering when multiple locks exist;
-- avoid detached threads;
-- make shutdown deterministic.
+- one context owns the write index;
+- one context owns the read index;
+- publication ordering must be valid in the C++ memory model;
+- fixed capacity is preferred;
+- overflow behaviour is explicit.
 
-## 8. Templates, Traits, and Concepts
+Do not hold locks across arbitrary callbacks or user code.
 
-Template code must remain understandable.
+Shutdown must be deterministic.
 
-Rules:
+## 14. Logging
 
-- use concepts to express API constraints;
-- use traits to describe facts, not run heavy computation;
-- keep constraints close to public APIs;
-- make unsupported combinations fail with clear diagnostics;
-- prefer `if constexpr`, traits, tags, and named helper types over fragile overload tricks;
-- avoid recursive template machinery when a `constexpr` loop is clearer.
+Logging is instrumentation, not game state.
 
-When template code becomes fragile:
+Logging may be globally reachable if it does not change program semantics.
 
-1. identify the logical objects;
-2. capture them as named types;
-3. pass those types to helpers;
-4. compute through traits or static accessors;
-5. materialize the result;
-6. add a compile-time regression test.
+Required direction:
 
-## 9. Compile-Time Code
+- severity and category filtering;
+- compile-time elimination of disabled grades;
+- monotonic event timestamp;
+- RAII function tracing at verbose grades;
+- serialized physical output;
+- fixed-capacity embedded transport;
+- no required dynamic allocation.
 
-Use compile-time computation deliberately.
+On embedded targets, prefer a small local UART/ISR path over introducing a logging
+framework.
 
-Rules:
+## 15. Templates, concepts and compile-time code
 
-- use `consteval` when runtime execution must be impossible;
-- use `constexpr` when runtime execution is also acceptable;
-- do not assume `constexpr` means compile-time only;
-- materialize compile-time results into explicit values or types;
-- bound compile-time work;
-- avoid type explosions for large objects;
-- keep compile-time tests small and focused.
+Templates must remain readable.
 
-## 10. Testing
+Use concepts to express API constraints close to the public declaration.
 
-Every public feature needs tests.
+Prefer:
 
-Rules:
+- named types;
+- structural policy objects;
+- `if constexpr`;
+- `constexpr` loops;
+- `consteval` when runtime execution must be impossible.
 
-- every bug fix should add a regression test when practical;
-- test behavior and invariants, not implementation details;
-- use compile-time tests for traits, concepts, dimensions, and invalid operations;
-- use property or differential tests for algebraic and numerical code;
-- keep benchmarks separate from correctness tests;
-- use sanitizers where practical;
-- do not weaken tests to pass the build;
-- the framework is **GoogleTest**, configured through `-DX_GTEST_DIR` or FetchContent as
-  described in `../AGENTS.md`; test naming follows `coding_style.md` §16;
-- determinism is asserted, not assumed: identical scripted input must produce identical
-  world digests, and any container iteration that can influence logic output or rendered
-  state must have a defined order (`IMPLEMENTATION.md` §7.1).
-- The test directory tree follows the same tree structure as `src/` but under `tests/`, so
-  `src/directory-a/example.cpp` is tested in `tests/directory-a/example.cpp`
-- test coverage should reach 85%+ minimum, targetting a 100% when possible.
+Avoid recursive metaprogramming when normal compile-time code is clearer.
 
-For numerical code, test residuals and invariants, not only element-by-element equality.
+Use `static_assert` for compile-time architectural relationships.
 
-## 11. CMake
+"Viva la constness" is a project virtue, but do not distort an otherwise simple algorithm
+solely to earn a `constexpr` badge.
+
+## 16. Public/class API design
+
+Landor is an application, not a library, but class interfaces still matter.
+
+The public part of a class should be complete enough that another subsystem can use it
+naturally without reaching into internals or inventing helpers.
+
+Keep implementation details private.
+
+Prefer explicit names and predictable overloads.
+
+Make ownership, allocation, lifetime and expensive operations visible.
+
+Do not minimize a public surface merely for the sake of minimalism if doing so makes the
+class harder to use correctly.
+
+## 17. Includes
+
+Prefer direct includes for actual contracts.
+
+Do not pursue forward declarations as a style goal. Use them when they materially reduce
+coupling or solve a real include problem.
+
+Every header must compile independently of accidental include order.
+
+Fix cyclic dependencies structurally.
+
+## 18. Warnings
+
+Landor code must be warning-free with warnings treated as errors.
+
+Enable aggressive GCC/Clang diagnostics as supported, including the families that catch:
+
+- narrowing/conversion;
+- signedness;
+- shadowing;
+- questionable casts;
+- format errors;
+- undefined preprocessor assumptions;
+- implicit fallthrough;
+- virtual-interface mistakes where applicable.
+
+Typical baseline:
+
+```text
+-Wall
+-Wextra
+-Wpedantic
+-Werror
+```
+
+and additional useful warnings such as:
+
+```text
+-Wconversion
+-Wsign-conversion
+-Wshadow
+-Wformat=2
+-Wundef
+-Wcast-align
+-Wcast-qual
+-Wold-style-cast
+-Wdouble-promotion
+-Wimplicit-fallthrough
+```
+
+should be enabled where the compiler supports them.
+
+Do not globally silence a warning because one piece of code is inconvenient.
+
+Third-party code does not inherit Landor's warning policy.
+
+## 19. Tests
+
+Tests use GoogleTest. GoogleMock is allowed.
+
+The test tree mirrors `src/`:
+
+```text
+src/world/coord.hpp
+tests/world/test_coord.cpp
+```
+
+CMake lists tests explicitly.
+
+Every bug fix should add a regression test when practical.
+
+Test behaviour and invariants rather than private implementation.
+
+Use compile-time tests for:
+
+- concepts;
+- type identity;
+- capacity/policy relationships;
+- `constexpr`/`consteval` contracts.
+
+After modifying code:
+
+- run relevant tests;
+- run the full suite for cross-contract changes;
+- build with warnings as errors.
+
+Do not add arbitrary project-wide coverage percentages at this stage. Coverage targets may
+be introduced later when they serve a concrete purpose.
+
+## 20. CMake and build tree
 
 Use target-based CMake.
 
-Rules:
+Normal build root:
 
-- avoid global include directories and global compiler flags;
-- keep tests, examples, benchmarks, and tools as separate targets;
-- export compile commands for LSP and static-analysis tools;
-- register public headers explicitly;
-- build directories stay under `transient/pipeline3/builds/<variant>` and `cmake --build`
-  / `ctest` run *from* the build directory, per `../AGENTS.md` — snippets elsewhere in
-  this document show `build/` only as shorthand;
-- do not add required `.cpp` files to a header-only library core;
-- keep optional dependencies from leaking into core public headers;
-- the project must load unchanged in any IDE, including Qt Creator: conventional
-  targets, cache variables for options, no absolute paths, no generator-specific logic,
-  no IDE-owned files committed — compatibility comes from being ordinary CMake, not from
-  IDE-specific configuration.
+```text
+transient/build
+```
 
-## 12. Public API Design
+Keep build/generated files out of the source tree.
 
-Public APIs should make correct use obvious and unsafe use explicit.
+Use ordinary portable CMake that IDEs can consume without IDE-owned repository files.
 
-Rules:
+Do not glob source/test files that form part of an explicit target contract.
 
-- prefer explicit names over clever overloads;
-- keep overload sets small and predictable;
-- make ownership, allocation, and lifetime visible;
-- distinguish mathematical, structural, and elementwise operations by name;
-- avoid APIs that look cheap but perform expensive work;
-- do not expose implementation policy types unless users need them.
+## 21. Documentation discipline
 
-## 13. Platform and Portability
+Headers are architecture documentation.
 
-Landor targets Linux PC, Raspberry Pi Zero, Raspberry Pi Pico (RP2044) and an STM32
-Disco-class board. The microcontroller targets are **portable but not built daily**: the
-working build is Linux, with periodic device builds. The consequence is that a target
-constrains what core code may rely on, not which toolchain is used every commit.
+Public/contract headers should explain:
 
-Rules:
+- responsibility;
+- ownership;
+- lifetime;
+- invariants;
+- allocation;
+- extension seams;
+- why a tempting simpler-looking alternative is wrong when that knowledge matters.
 
-- core layers (`world`, `game`, `render`) build with `-fno-exceptions -fno-rtti`; host
-  tooling (`host`, `tools/`, tests) may use exceptions;
-- no `dynamic_cast`, `typeid`, or dependency on RTTI for dispatch;
-- game logic time advances in **steps**. Wall-clock and millisecond values belong to the
-  host layer for display and pacing only and never enter rules, saves, or digests;
-- core code avoids facilities that are unavailable or heap-hungry on small targets:
-  formatting and stream I/O live in `host` (`std::format` included), while `world`/`game`
-  use integer arithmetic, fixed buffers and explicit accessors;
-- colours are palette indices agreed between the frame builder and the renderer, never
-  colour classes from a GUI toolkit;
-- a core-only build (`-std=c++20 -fno-exceptions -fno-rtti`, excluding `host`) runs in CI
-  so portability drift is caught in hours rather than at the next device build;
-- impossible memory configurations should fail at configure time, not on hardware nobody
-  has attached (`IMPLEMENTATION.md` §8).
+Use `DESIGN_DECISIONS.md` for broader rejected alternatives/rationale.
 
-## 14. Forbidden Patterns
+Do not turn headers into chronological design diaries.
 
-Avoid:
+When an architectural change makes an existing substantial comment false, updating the
+comment is part of the code change.
 
-- broad rewrites for local bugs;
-- generic abstractions before real repeated use exists;
-- macros for algorithm dispatch or type logic;
-- hidden global configuration that changes behavior unpredictably;
-- unchecked casts used to silence warnings;
-- raw owning pointers without policy;
-- dangling views or references;
-- hidden heap allocation in deterministic paths;
-- weakening tests, warnings, assertions, or diagnostics;
-- mixing formatting-only changes with logic changes.
+The same applies to relevant Markdown documentation.

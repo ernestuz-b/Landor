@@ -1,149 +1,184 @@
 # Landor
 
-> A tiny game for big ideas.
+> A small game built to carry a surprisingly large world.
 
-Landor is a top-down exploration game written in **C++20 with no dependencies**.
-You live in a little valley, wander anywhere you like, hunt for hidden shards,
-open what is locked, and reach the beacon. Complete the missions and grow,
-It starts as an ASCII game and later grows tiled graphics, all while running on 
-hardware as small as a Raspberry Pi Pico.
+Landor is an open-source exploration, simulation and learning game written in modern C++.
 
-| | |
-| --- | --- |
-| **Language** | C++20, standard library only — no third-party dependencies |
-| **View** | UTF-8 text tiles now (ASCII fallback), tiled graphics later (same grid) |
-| **Targets** | Linux PC, Raspberry Pi Zero, Raspberry Pi Pico, STM32F429 Discovery |
-| **Current version** | 0.1 (starter valley; not all game dynamics yet) |
-| **Status** | Design phase — interface and contracts first, then implementation |
+The game is being designed from the world model outward. Terrain, water, fire, weather,
+plants, animals, people, ownership, schedules, settlements and other systems are intended
+to interact through simulation rather than through a collection of scripted special cases.
+The story and game mechanics provide a reason to explore those systems.
+
+The first renderer is deliberately simple: UTF-8/text. Later renderers may be graphical,
+including isometric or small 3D presentations, without replacing the underlying world
+model.
+
+Landor is also a C++ engineering project. It deliberately targets both Linux-class
+machines and small embedded systems such as Raspberry Pi Pico and STM32 devices. The
+architecture therefore favours explicit ownership, bounded memory, compile-time structure,
+determinism and platform seams that remain visible in the code.
+
+## Current state
+
+Landor is in an architecture-and-contract phase.
+
+The repository currently contains:
+
+- the managed heap component used when genuinely dynamic allocation is unavoidable;
+- geometry primitives and tests;
+- the layer-oriented world model contracts;
+- reusable `Patch`, live `Placement`, story-facing `Place` and `PatchSet` concepts;
+- the `Map` contract that synthesizes complete tile values from independent layers;
+- the first platform-independent storage contract and a filesystem-backed implementation contract;
+- GoogleTest-based contract and behavioural tests.
+
+The game itself is not yet a playable release. Old README text describing shards, a chest,
+a key and a beacon was an early fixture, not the definition of Landor.
+
+## Language and targets
+
+Landor is a **C++23** project.
+
+The supported portable subset is the subset exercised by the supported toolchains and CI.
+A C++23 facility is not assumed to be portable merely because one desktop compiler
+implements it.
+
+Primary target classes are:
+
+- Linux desktop/workstation;
+- Raspberry Pi Zero-class Linux systems;
+- Raspberry Pi Pico/RP2040-class microcontrollers;
+- STM32-class microcontrollers.
+
+Ports may differ in ambition, rendering and world scale. They should share formats,
+architecture and engineering contracts where practical; they are not required to be
+bit-for-bit identical games.
+
+Landor runtime code has no required third-party runtime framework. Development and tests
+may use external tools such as GoogleTest/GoogleMock.
+
+## World model in one page
+
+### Layers, not stored tiles
+
+World state is layer-oriented. Terrain, elevation, water, fire, moisture, wind and future
+properties are independent layer kinds.
+
+A `Layer` is a type-level description of one spatial property. It defines a stable layer
+id and a value type; it does not own storage or simulation policy.
+
+A `Tile` is a short-lived value assembled when somebody asks what exists at one
+coordinate. It owns copies of the resolved layer values. There is no authoritative array
+of complete `Tile` objects.
+
+This distinction matters. A patch that contains no authored Fire layer does **not** mean
+fire cannot exist there. Fire may come from a default, procedural generation or live
+simulation state.
+
+### Patch, Placement, PatchSet and Place
+
+An authored `Patch` is immutable reusable spatial content. It has geometry and zero or
+more layer bindings to logical storage sources.
+
+A `Placement` is one live occurrence of a patch in a map. It gives the patch a position
+and orientation. Several placements may refer to the same authored patch.
+
+A `PatchSet` is an immutable recipe used to compose groups of patches, such as a home
+made from a house, well, barn, fields and a unique feature.
+
+A `Place` is a story-facing identity. Schedules, ownership, dialogue and missions should
+refer to a place rather than to the authored patch used to draw it.
+
+### Map
+
+`Map` is the logical spatial surface.
+
+It owns live placements, resolves each layer independently, and synthesizes `Tile` values.
+Authored data, procedural/default values and materialized simulation state can therefore
+coexist at one coordinate without forcing them into one stored structure.
+
+A synthetic tile cache is permitted as a disposable optimization. It is never
+authoritative state.
+
+## Storage
+
+World code addresses storage through logical `SourceId`, byte offset and size values. It
+must not infer paths, sectors, pages, erase blocks or file handles from a source id.
+
+The concrete storage implementation is selected at **build time**. Common code uses the
+selected `landor::storage::Storage` alias.
+
+The intended rule is simple:
+
+- implementation known when the target is built -> CMake selects the implementation;
+- variation represented by C++ types -> templates/concepts;
+- implementation genuinely unknown until runtime -> runtime polymorphism.
+
+Do not introduce virtual dispatch merely to abstract something the build already knows.
+
+## Memory
+
+Prefer fixed-capacity and value storage whenever a useful upper bound exists.
+
+If a capacity affects object layout or type identity, it is a compile-time parameter.
+When a type has several related capacities, prefer a named structural policy over an
+unreadable list of integer template arguments.
+
+The managed heap under `include/managed_heap/` comes from another project and is used when
+dynamic allocation is genuinely unavoidable. Treat it as an imported component: use its
+public contract and do not modify it casually as part of unrelated Landor work.
+
+Allocating standard containers are not the default in core/runtime code. They may be used
+only when their allocation semantics are explicitly suitable for the target and allocator.
+The relocatable managed heap is not automatically a valid STL allocator.
+
+## Build and tests
+
+The normal build directory is:
+
+```text
+transient/build
+```
+
+Typical host build:
+
+```bash
+cmake -S . -B transient/build
+cmake --build transient/build -j
+ctest --test-dir transient/build --output-on-failure
+```
+
+Tests use GoogleTest. GoogleMock is also allowed where interaction testing is clearer than
+a concrete fake.
+
+Tests should mirror the source tree:
+
+```text
+src/world/coord.hpp
+tests/world/test_coord.cpp
+```
+
+The current tree predates that final rule in a few places; see `STATUS.md`.
 
 ## Documentation
 
-| Document | Audience | What is in it |
-| --- | --- | --- |
-| [`GAMEPLAY.md`](GAMEPLAY.md) | players, including children | how to play, controls, pictures, tips — no technicalities |
-| [`IMPLEMENTATION.md`](IMPLEMENTATION.md) | developers | design decisions, data model, terrain editing, rendering, configuration |
-| this file | everyone | what the project is, how to get and run it, where things live |
+Read documentation in this order when modifying the repository:
 
-## Features (0.1 and direction)
+1. [`STATUS.md`](STATUS.md) — what exists now and what is currently inconsistent;
+2. [`dev-docs/DESIGN_STATE.md`](dev-docs/DESIGN_STATE.md) — current architecture;
+3. [`dev-docs/DESIGN_DECISIONS.md`](dev-docs/DESIGN_DECISIONS.md) — important settled choices and why;
+4. [`dev-docs/IMPLEMENTATION.md`](dev-docs/IMPLEMENTATION.md) — how the current contracts fit together;
+5. [`dev-docs/coding_rules.md`](dev-docs/coding_rules.md) — engineering rules;
+6. [`dev-docs/coding_style.md`](dev-docs/coding_style.md) — formatting, naming and code-reading conventions;
+7. [`AGENTS.md`](AGENTS.md) — operational rules for automated coding agents.
 
-* Free exploration of a single hand-authored valley with fog of war and remembered
-  terrain; `Explored N%` progress in the HUD.
-* Day/night cycle that shrinks vision, driven by a deterministic step counter.
-* Objectives: collect shards, pry a chest open for a key, unlock the gate, reach the
-  beacon to win.
-* Editable terrain — dig, breach, pave and remove roads — as journaled transactions.
-* Engine-style object model: Actor → Pawn → Character, NPCs whose choices follow D&D
-  alignment through behaviour trees, animals as actors, crops as tile state.
-* Deterministic rules: no RNG, no wall-clock, scriptable headless play, replay-based
-  saves.
-* Bounded memory: every dynamic object lives in one fixed-size managed-heap region —
-  no system allocator, no unbounded growth
-  ([`IMPLEMENTATION.md`](IMPLEMENTATION.md) §2.4).
-* Graphics-ready from the start: every tile carries a stable id next to its glyph, so
-  a sprite renderer can index an atlas without touching a single rule.
+Headers are also part of the architecture documentation. Public types should explain
+ownership, lifetime, invariants, extension seams and non-obvious rationale.
 
-## Getting the code
-
-```bash
-git clone <repository-url> landor
-cd landor
-```
-
-## Building and running
-
-All check scripts run from the project root:
-
-```bash
-tools/checks/check-build.sh              # configure + build (Debug)
-tools/checks/check-tests.sh              # run the test suite
-tools/checks/check-warnings.sh           # build with warnings treated as errors
-tools/checks/check-sanitizers.sh         # ASan + UBSan build and tests
-tools/checks/check-static.sh             # full clang-tidy + cppcheck analysis
-tools/checks/check-static.sh --file F    # analyse a single file
-tools/checks/check-tidy-changed.sh       # clang-tidy for changed files
-```
-
-Build and test manually:
-
-```bash
-cmake -S . -B transient/pipeline3/builds/debug \
-      -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-cmake --build transient/pipeline3/builds/debug -j
-cd transient/pipeline3/builds/debug && ctest --output-on-failure
-```
-
-Run the game from the project root (world files load by relative path), or pass
-`--world /abs/path.txt`:
-
-```bash
-transient/pipeline3/builds/debug/landor                      # play
-transient/pipeline3/builds/debug/landor --demo               # watch a winning route
-transient/pipeline3/builds/debug/landor --headless --script route.txt
-transient/pipeline3/builds/debug/landor --save save.txt      # autosaves on quit
-transient/pipeline3/builds/debug/landor --load save.txt
-transient/pipeline3/builds/debug/landor --view 60x30
-```
-
-Keys: `WASD` or arrow keys to move, `E` to interact, `Q`/`Esc` to quit. Full player
-guide: [`GAMEPLAY.md`](GAMEPLAY.md).
-
-> **Note** — the repository is currently at the design stage: only the documents and
-> the [`managed-heap`](managed-heap/) component exist so far. The commands above
-> describe the intended interface; they become valid as the corresponding
-> milestones land. See [Status](#status-and-roadmap).
-
-## Repository layout
-
-```
-README.md            this file
-GAMEPLAY.md          player guide (non-technical)
-IMPLEMENTATION.md    technical design and decisions
-dev-docs/            phases, binding, rules of the repo workflow
-src/world            cells, chunks, tile descriptors, terrain operations
-src/game             rules: step(), inventory, vision, day/night, win state
-src/render           frame builder, auto-tiling/influence, terminal & headless backends
-src/actor            Actor / Pawn / Character, controllers
-src/npc              alignment, behaviour trees, dialog
-src/host             argv, interactive terminal, script replay, save/load
-managed-heap/        single-header managed object store, frozen component
-                     (SPEC.md, USER_GUIDE.md)
-assets/worlds/       plain-text maps, one glyph per tile
-assets/tilesets/     graphics atlases (later versions)
-tools/               map generator, check scripts
-transient/           builds and pipeline artefacts (never at the project root)
-```
-
-## Development
-
-Build and analysis artifacts stay under `transient/pipeline3/builds/<variant>`, and
-`cmake --build` / `ctest` run *from* the build directory. Preferred entry points are
-the check scripts in `tools/checks/` (`check-build.sh`, `check-tests.sh`,
-`check-warnings.sh`, `check-sanitizers.sh`, `check-static.sh`, `check-tidy-changed.sh`).
-Repository-wide agent and workflow instructions live in the parent
-[`../AGENTS.md`](../AGENTS.md).
-
-Ground rules for contributors:
-
-* Rules live in `world`/`game`; rendering only reads state through `Frame`.
-* Terrain changes only through the single terrain-operation API.
-* No magic numbers outside the generated config header and rule tables.
-* Determinism includes container iteration order — see
-  [`IMPLEMENTATION.md`](IMPLEMENTATION.md) §7.
-* Plain standard CMake only: any IDE, Qt Creator included, must be able to open the
-  project as-is. No IDE-owned files in the repo, no generator-specific logic.
-
-## Status and roadmap
-
-| Version | Content |
-| --- | --- |
-| **0.1** *(current)* | Starter valley: shards, chest and key, gated beacon, day/night, fog of war, HUD, ASCII rendering, headless demo/script modes, save/load |
-| 0.x | Terrain editing in play, first NPC with alignment-driven behaviour tree, elevation rules |
-| 1.0 | ASCII-only release: full valley objectives, NPC population, behaviour trees, dialog |
-| > 1.0 | Tiled graphics renderer, ecology (crops and animals), further targets |
-
-Known open design questions are listed at the end of
-[`IMPLEMENTATION.md`](IMPLEMENTATION.md); answering them is part of the current work.
+If source and documentation disagree about what is currently implemented, source and tests
+win. Do not silently preserve stale prose: report the mismatch and update the relevant
+documentation when the architectural contract changes.
 
 ## License
 
-Not yet declared.
+The repository contains the **GNU General Public License, version 2**. See [`LICENSE`](LICENSE).

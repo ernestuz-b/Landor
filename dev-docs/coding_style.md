@@ -1,439 +1,440 @@
-# C++ Coding Style
+# Landor C++ Coding Style
 
-This document defines how the code should look and read.
+This document defines how Landor code should look and read.
 
-For engineering constraints, safety policy, testing policy, allocation discipline, and agent behavior, use `coding_rules.md`. This file only defines style, layout, naming, and project idioms.
+Engineering constraints live in [`coding_rules.md`](coding_rules.md).
 
-Examples in this file use the project namespace `example_namespace`.
+## 1. General style
 
-### Scope note (Landor)
+The code should be:
 
-For Landor, read `example_namespace` as the top-level namespace `landor`, with one
-namespace per layer (`landor::world`, `landor::game`, `landor::render`,
-`landor::actor`, `landor::npc`, `landor::host`) and internals under `::detail`.
+- explicit;
+- readable;
+- const-correct;
+- easy to review;
+- easy to debug;
+- unsurprising about allocation and ownership.
 
-Landor is a **dependency-free C++20** project. Every mention of Qt in this file refers to
-conventions, never to a dependency: *"Qt-like brace style"* names a brace placement, and
-Qt Creator is supported as an IDE that reads the CMake project (`CMAKE_EXPORT_COMPILE_COMMANDS=ON`).
-No Qt type appears in Landor APIs or data.
-
-Qt Creator compatibility is a property of the build files, not of the sources: plain,
-conventional CMake that any IDE can load, with no IDE-specific files or variables, and
-build directories following `../AGENTS.md` (`transient/pipeline3/builds/<variant>`).
-
-Unit tests use **GoogleTest**, as required by the repository workflow
-(`../AGENTS.md`); see §16 for naming.
-
-Engineering constraints, allocation discipline and error policy live in
-[`coding_rules.md`](coding_rules.md); design decisions and their rationale live in
-[`IMPLEMENTATION.md`](IMPLEMENTATION.md). This file states only how code should read.
-
-## 1. Style Goals
-
-Code should be readable, deterministic, testable, numerically explicit, easy to review, and difficult to misuse.
-
-The public API should be pleasant to use. The implementation should be conservative.
+The project borrows useful conventions from Qt-era C++ style but has no Qt runtime
+dependency.
 
 ## 2. Formatting
 
-Use Qt-like brace style for functions, classes, namespaces, and control blocks.
+`.clang-format` is the formatting authority.
 
-This section is machine-encoded in [`.clang-format`](.clang-format) (`IndentWidth: 4`,
-`UseTab: Never`, `ColumnLimit: 100`, custom brace wrapping reproducing the example below,
-project headers grouped last); run it rather than formatting by hand. The formatter does
-not enforce the "braces on every control block" rule below — that is a review and
-clang-tidy concern.
+The intended brace style puts declaration **and control-flow** braces on the next line:
 
 ```cpp
-namespace example_namespace {
+namespace landor::geo
+{
 
-class MatrixView
+class Patch
 {
 public:
-    constexpr MatrixView() = default;
-
-    constexpr auto rows() const noexcept -> std::size_t
+    void example()
     {
-        return m_rows;
-    }
+        if (condition)
+        {
+            do_something();
+        }
+        else
+        {
+            do_something_else();
+        }
 
-private:
-    std::size_t m_rows = 0;
+        for (const auto& item : items)
+        {
+            use(item);
+        }
+    }
 };
 
-} // namespace example_namespace
+} // namespace landor::geo
 ```
 
-Use braces for all control blocks, even one-line bodies.
-
-```cpp
-if (pivot == Scalar{}) {
-    return LinearStatus::Singular;
-}
-```
-
-## 3. Indentation and Line Length
+Always use braces for control blocks, including one-line bodies.
 
 Use:
 
 ```text
 4 spaces
 no tabs
-preferred line length: 100 columns
-hard maximum: 120 columns
+100-column normal limit
 ```
 
-Break long expressions for clarity.
+Break long expressions where it improves reading.
 
-```cpp
-const auto residual =
-    norm(multiply(a, x) - b);
-```
+## 3. Files and directories
 
-For long template declarations, split parameters vertically when useful.
-
-```cpp
-template <
-    std::size_t Rows,
-    std::size_t Cols,
-    typename Scalar>
-class StaticMatrix;
-```
-
-## 4. File Naming and Headers
-
-Use lowercase snake case for file names.
-
-Good:
+Use lowercase snake_case file names:
 
 ```text
-static_matrix.hpp
-dynamic_matrix.hpp
-numeric_traits.hpp
-joseph_update.hpp
+storage_contract.hpp
+storage_filesystem.cpp
+design_helpers.hpp
 ```
 
-Bad:
+Use `.hpp` for C++ headers and `.cpp` for non-trivial out-of-line implementation.
 
-```text
-StaticMatrix.hpp
-numericTraits.hpp
-JosephUpdate.hpp
-```
+Default rule:
 
-Header files use:
+- templates and compile-time contracts live in headers;
+- tiny obvious accessors may be inline;
+- non-trivial implementation goes in `.cpp` when it does not need to be visible for
+  templates/compile-time use.
+
+The physical directory tree does **not** have to mirror namespaces.
+
+`src/world/` may contain `landor::geo` and `landor::world`.
+
+## 4. Headers
+
+Use:
 
 ```cpp
 #pragma once
 ```
 
-Every public header must be self-contained.
+Every header should include what it needs directly.
 
-```cpp
-#include <example/core/bcache_model.hpp>
+Prefer direct includes over extensive forward declarations.
 
-int main()
-{
-}
-```
+Order includes in formatter-managed groups:
 
-Standard-library headers and headers belonging to installed third-party libraries, found through the include path, shall be included using angle brackets. Headers belonging to the current project shall be included using quotation marks.
+1. C/system headers where applicable;
+2. C++ standard/external installed headers;
+3. current-project headers.
 
-Examples:
-
-```cpp
-// Inside the project itself
-#include "detail/storage.hpp"
-
-// A system include
-#include <cstdio>
-```
-
-C++ only headers should have the 'hpp' extension.
+Project headers use quotes. Standard/external installed headers use angle brackets.
 
 ## 5. Namespaces
 
-All public symbols live under:
+Public project symbols live under `landor` with meaningful subsystem namespaces, for
+example:
 
 ```cpp
-namespace example_namespace {
-}
+landor::geo
+landor::world
+landor::storage
+landor::render
 ```
 
-Implementation details live under:
+Do not maintain a fixed master list of allowed namespaces. Add a subsystem namespace when
+the model needs one.
+
+Implementation-only helpers may use a local `detail` namespace when useful.
+
+Always use a closing namespace comment.
+
+## 6. Type and identifier naming
+
+### Types
+
+PascalCase:
 
 ```cpp
-namespace example_namespace::detail {
-}
+StorageFilesystem
+LayerBinding
+PatchSetRole
+MapCapacity
 ```
 
-Never expose `detail` symbols as part of the public API.
+### Functions and methods
 
-Use closing namespace comments.
+snake_case:
 
 ```cpp
-} // namespace example_namespace
+natural_position()
+placement_count()
+set_orientation()
 ```
 
-## 6. Naming Conventions
+### Variables and parameters
 
-Enum value casing follows [`coding_rules.md`](coding_rules.md) §Naming: scoped enums use
-PascalCase values (`OpKind::PaveRoad`, `Mark::Remembered`), unscoped enums use `ALL_CAPS`.
-Flag sets that combine with `|` are ordinary lowercase `snake_case` constants rather than
-enums.
-
-Use `PascalCase` for public types.
+snake_case:
 
 ```cpp
-StaticMatrix
-DynamicMatrix
-SmallMatrix
-LinearResult
-SolvePolicy
-MatrixStructure
-ScalarDomain
+source_size
+natural_position
+placement_id
 ```
 
-Use `snake_case` for functions.
+### Private data members
+
+Prefix with `m_`:
 
 ```cpp
-solve()
-inverse()
-determinant()
-condition_estimate()
-rank_estimate()
-elem_exp()
-matrix_exp()
-lu_decompose()
-cholesky_decompose()
+MapId m_id;
+area_type m_area;
 ```
 
-Use `snake_case` for local variables and function parameters.
+### Compile-time constants
+
+lowercase snake_case:
 
 ```cpp
-const auto pivot_row = find_pivot_row(a, column);
-```
-
-Private member variables use `m_`.
-
-```cpp
-std::size_t m_rows = 0;
-std::size_t m_cols = 0;
-std::vector<Scalar> m_data;
-```
-
-Use `snake_case` for `constexpr` constants.
-
-```cpp
-inline constexpr auto default_tolerance = 1.0e-6;
+inline constexpr std::size_t default_capacity = 64;
 ```
 
 Avoid macro constants.
 
-`ALL_CAPS` is therefore reserved for the preprocessor. Configuration knobs are ordinary
-lowercase `snake_case` constants (`landor::cfg::cell_bits`) — this deliberately matches
-the generated config header described in `IMPLEMENTATION.md` §8, where `configure_file`
-makes macro-versus-constant confusion likely.
+## 7. Enums
 
-No member prefix other than `m_`. Never use `_Foo` (leading underscore plus uppercase) or
-`__foo`: both are reserved to the implementation, so such names are undefined behaviour
-rather than a style choice.
+Use scoped enums by default.
 
-Use `struct` for passive data — all members public, no invariants, brace-initialised at
-compile time — which covers tile descriptors, render cells and terrain-operation records.
-Use `class` as soon as a type owns an invariant or behaviour (`World`, `Game`, renderers).
+Scoped enum values use **PascalCase**, following the Qt convention:
 
-## 7. Source Layout
+```cpp
+enum class Error : std::uint8_t
+{
+    None,
+    InvalidSource,
+    OutOfRange,
+    ReadOnly,
+    NoSpace,
+    ReadFailed,
+    WriteFailed
+};
+```
 
-The project doen't use a standard include/src split.
+```cpp
+enum class Rotation : std::uint8_t
+{
+    None,
+    Clockwise90,
+    Clockwise180,
+    Clockwise270
+};
+```
 
-Rules:
+Do not use snake_case enum values.
 
-- every public header must be self-contained;
-- prefer `.hpp`/`.cpp` splits for non-trivial code;
-- trivially inline functions may remain in headers;
-- avoid global mutable state;
-- avoid ODR hazards.
+## 8. `struct` versus `class`
 
-## 8. Includes
+Use `struct` for passive data whose public members are the representation and which has no
+invariant requiring encapsulation.
 
-Include only what is needed.
+Use `class` when the type owns behaviour/invariants or controls mutation.
+
+This is a semantic choice, not a rule about object size.
+
+## 9. `const`, `constexpr` and `consteval`
+
+Prefer immutable locals.
+
+Use `const` aggressively when a value does not change.
+
+Use `constexpr` wherever compile-time and runtime use are both natural.
+
+Use `consteval` when runtime execution would be a misuse.
+
+Examples:
+
+```cpp
+[[nodiscard]] constexpr PatchId id() const noexcept
+{
+    return m_id;
+}
+
+template<Layer LayerT>
+[[nodiscard]] static consteval bool supports() noexcept
+{
+    return (...);
+}
+```
+
+Do not reuse a variable for a different meaning merely to avoid declaring another const
+local.
+
+## 10. `noexcept`
+
+`noexcept` documents a semantic promise.
+
+Use it where that promise is meaningful, especially for:
+
+- simple accessors;
+- value operations;
+- destructors;
+- moves where applicable;
+- low-level/platform operations that are intentionally non-throwing.
+
+Do not mechanically append `noexcept` to every function merely because this project builds
+without exceptions.
+
+## 11. Casts
+
+Use C++ casts:
+
+```cpp
+static_cast<T>(value)
+```
+
+Do not use C-style casts in Landor code except at an unavoidable C/vendor interop boundary.
+
+Never cast merely to silence a warning without first understanding the conversion.
+
+## 12. `auto`
+
+Use `auto` when the type is obvious from the expression or the exact spelling is noise.
+
+Prefer an explicit type when:
+
+- integer width matters;
+- signedness matters;
+- conversion is part of the reasoning;
+- ownership/lifetime is clearer with the explicit type.
+
+## 13. Control flow
+
+Prefer shallow control flow and early rejection.
 
 Good:
 
 ```cpp
-#include <array>
-#include <cstddef>
-#include <type_traits>
-
-#include "example/core/result.hpp"
-```
-
-Bad inside an internal library header:
-
-```cpp
-#include "example/example.hpp"
-```
-
-Public headers must not depend on include order.
-
-Avoid cyclic includes. If a cycle appears, fix the dependency structure.
-
-## 9. Use of `auto`
-
-Use `auto` when the type is obvious or irrelevant.
-
-Good:
-
-```cpp
-auto result = StaticMatrix<Rows, Cols, Scalar>{};
-```
-
-Prefer explicit scalar types when conversion or precision matters.
-
-```cpp
-const Scalar pivot = a(row, col);
-```
-
-Avoid:
-
-```cpp
-auto pivot = a(row, col);
-```
-
-when the scalar type matters.
-
-## 10. Const Correctness
-
-Use `const` aggressively.
-
-```cpp
-constexpr auto rows() const noexcept -> std::size_t
+if (!contains(position))
 {
-    return Rows;
+    return false;
+}
+
+const auto* placement = find_placement(id);
+if (placement == nullptr)
+{
+    return false;
+}
+
+return apply_change(*placement);
+```
+
+Avoid clever compound conditions with side effects.
+
+Avoid `goto`.
+
+## 14. Comments
+
+Comments explain **why**, ownership and invariants; they do not narrate obvious syntax.
+
+Use:
+
+- `//` for a single-line comment;
+- `/* ... */` for a multi-line implementation comment;
+- `///` or `/** ... */` for Doxygen/public API documentation.
+
+Public/architectural type comments should explain:
+
+- what the type represents;
+- what it owns;
+- what it borrows;
+- lifetime assumptions;
+- invariants;
+- how it composes with neighbouring types;
+- important rejected alternatives when knowing them prevents misuse.
+
+Example:
+
+```cpp
+/**
+ * One live occurrence of an authored Patch.
+ *
+ * Placement owns only identity and transform. Authored layer data remains in
+ * Patch. Spatial mutation goes through Map so derived caches cannot become
+ * stale.
+ */
+```
+
+Do not turn source comments into a chronological design diary. Broader rationale belongs
+in `DESIGN_DECISIONS.md`.
+
+## 15. Public class surfaces
+
+Landor is not being designed as a general-purpose library, so do not contort classes to
+minimize an exported ABI.
+
+Still, a class's public part should be complete and pleasant enough that another subsystem
+can use it without reaching into internals.
+
+Expose the concepts callers genuinely need. Hide policy/representation that they do not.
+
+## 16. Includes versus forward declarations
+
+Prefer the direct include when the type is genuinely part of the contract.
+
+Forward-declare when it provides a concrete coupling/build benefit.
+
+Do not forward-declare merely because a style guide says fewer includes are always better.
+
+## 17. Error/result code at call sites
+
+Keep recoverable control flow visible:
+
+```cpp
+auto result = storage.read(source, offset, destination);
+
+if (!result)
+{
+    return std::unexpected(result.error());
 }
 ```
 
-Prefer immutable locals unless mutation is required.
+For `std::expected`, prefer explicit checks, dereference and `.error()` over `.value()`.
+
+Simple lookup absence may remain simple:
 
 ```cpp
-const auto row_count = a.rows();
-```
-
-Do not reuse variables for different meanings.
-
-## 11. Control Flow Style
-
-Prefer simple control flow and early validation.
-
-```cpp
-if (!is_square(a)) 
+if (const auto* binding = patch.binding(layer))
 {
-    return LinearStatus::DimensionMismatch;
-}
-
-if (!is_supported_scalar<Scalar>) 
-{
-    return LinearStatus::UnsupportedScalarDomain;
-}
-
-return detail::solve_square(a, b);
-```
-
-Avoid deeply nested logic, `goto`, and complex side effects inside conditions.
-
-## 12. Error Result Style
-
-Failure examples should preserve diagnostics.
-
-Good:
-
-```cpp
-if (pivot_abs <= tolerance) 
-{
-    return LinearResult<Matrix>{
-        .value = {},
-        .status = LinearStatus::Singular,
-        .condition_estimate = {},
-        .residual_norm = {},
-        .pivot_min_abs = pivot_abs
-    };
+    use(*binding);
 }
 ```
 
-Bad:
+## 18. Logging call style
+
+The final logger is not implemented yet, but expected call sites look like normal
+instrumentation:
 
 ```cpp
-if (pivot_abs <= tolerance) 
-{
-    return {};
-}
+LANDOR_LOG_INFO("patch loaded");
+LANDOR_TRACE_FUNCTION();
 ```
 
+`LANDOR_TRACE_FUNCTION()` is intentionally RAII-backed and may compile to nothing at
+disabled grades.
 
-## 15. Comments
+Do not write game logic that depends on whether a log call executes.
 
-Comments should explain why, not repeat what the code says.
+## 19. Tests
 
-Good:
+GoogleTest names describe behaviour:
 
 ```cpp
-/* Use pivoted LU by default. The no-pivot path is only valid when the caller
-   explicitly accepts the risk through SolvePolicy::FastUnchecked. */
+TEST(Coord32, Neighbour8CoversEveryOctantExactlyOnce)
+TEST(Area32, IntersectionReturnsEmptyForDisjointAreas)
+TEST(StorageFilesystem, RejectsUnknownSource)
 ```
 
-Bad:
+GoogleMock is appropriate when the interaction itself is the contract.
+
+Avoid generic names such as:
 
 ```cpp
-// Increment i.
-++i;
+TEST(CoordTest, Test1)
 ```
 
-Every non-trivial numerical algorithm should include a short algorithm block.
+Test files mirror the source tree and use `test_` prefixes:
 
-```cpp
-/* Algorithm: LU decomposition with partial pivoting
-   Domain: floating-point and complex floating-point
-   Structure: general square matrix
-   Complexity: O(N^3)
-   Allocation: none for StaticMatrix; workspace-controlled for DynamicMatrix
-   Failure: returns Singular or NearSingular on poor pivots
-*/
+```text
+src/world/coord.hpp
+tests/world/test_coord.cpp
 ```
 
-Use // style comments for single line, and /* ... */ style for multiline comments.
+## 20. Final preference order
 
-Also use **Doxygen** style comments.
+When rules compete:
 
-## 16. Test Naming Style
+1. correctness;
+2. clear ownership and control flow;
+3. portability;
+4. readability;
+5. measured performance;
+6. cleverness.
 
-Landor uses **GoogleTest**. Test names still describe behaviour: the suite name encodes
-the module and unit under test, the test name states the observed behaviour.
-
-Good:
-
-```cpp
-TEST(WorldCell, ExposesHeightAndOverlayFields)
-TEST(ChunkStorage, ReadsUnpatchedTileFromCompressedBase)
-TEST(TerrainOp, RejectsExcavationOfUnbreakableBedrock)
-TEST(RenderFrame, BuildsViewWithOneTileHalo)
-TEST(StaticMatrix, MultiplicationDoesNotAllocate)
-```
-
-The last line shows the intended form for any test inherited from the source examples of
-this document; `TEST_CASE(...)` syntax belongs to another framework and is not used here.
-
-Bad:
-
-```cpp
-TEST(CellTest, Test1)
-TEST(world, cell)
-```
-
-## 17. Final Rule
-
-When style and safety conflict, choose safety.
-
-When cleverness and readability conflict, choose readability.
-
-When speed and numerical correctness conflict, choose numerical correctness by default and expose the fast unsafe path explicitly.
+Prefer code the next person can safely modify.

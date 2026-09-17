@@ -1,307 +1,331 @@
 # Landor — Project Status
 
-> **Purpose of this file.** A working cache of project state so a new session can orient
-> here instead of re-exploring the repository from scratch. Read §0, then jump straight to
-> the section your task needs. Full exploration becomes optional, not mandatory.
->
-> **Status = operational state. Design = [`dev-docs/DESIGN_STATE.md`](dev-docs/DESIGN_STATE.md).**
-> This file never overrides a design document. Where they disagree, DESIGN_STATE.md wins
-> and this file is the buggy one — report it, don't follow it.
->
-> ```
-> last verified   : git HEAD e4c9309 "Working on the documentation" (+ uncommitted namespace
->                   unification and the first CTest wiring, see §4/§6)
-> verified on     : 2026-09-16
-> verified by     : every command in §5 was actually run, output quoted
-> trust horizon   : if `git log -1 --oneline` no longer shows e4c9309, treat §5–§6 as STALE
->                   and re-run §5 (~1 min) before trusting numbers
-> headline        : EVERY HEADER UNDER src/ COMPILES AND CTest RUNS 13 GREEN TESTS.
->                   tests/test_world_headers.cpp pulls all of them into one TU, so a green
->                   build now really does mean "the design contracts still fit together" —
->                   all 15 headers under src/, 53 green tests.
-> ```
+This file describes **what exists now**, not the final architecture.
 
----
+Reviewed against repository head:
 
-## 0. Orientation in 60 seconds
-
-```bash
-cd /mnt/AI/AiProgs/experiments/Landor
-git log -1 --oneline && git status --short        # compare against the stamp above
-
-# (a) the whole gate — configure, build both targets, run the suite
-cmake -S . -B transient/build/verify >/dev/null
-cmake --build transient/build/verify -j8 2>&1 | tail -1
-ctest --test-dir transient/build/verify --output-on-failure | tail -3
-
-# No network? Reuse an already-fetched GoogleTest instead of downloading:
-cmake -S . -B transient/build/verify \
-  -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=$PWD/transient/build/gtest-check/_deps/googletest-src
-
-# (b) per-header health — now redundant with (a), kept because it localises WHICH header
-git ls-files 'src/*.hpp' | while read -r h; do \
-  n=$(g++ -fsyntax-only -std=c++20 -Isrc -Iinclude -x c++ "$h" 2>&1 | grep -c 'error:'); \
-  printf '%-34s %s\n' "$h" "$([ "$n" = 0 ] && echo clean || echo "$n errors")"; done
-
+```text
+3fb53801631e641c49f07e9525f71055eaf6af71
+Mostly moving old tests to gtest.
 ```
 
-There are no hand-rolled test mains left: everything runs through `ctest`. See §2 for the file layout.
+The source tree is ahead of several older design documents. The documentation refresh
+containing this file is intended to remove that drift.
 
-If those outputs match §5, everything below is current and you need nothing else.
+## Current repository state
 
-**Ignore these directories, always** — they are not source:
-`.kilo/worktrees/` (full duplicate copies of the repo), `transient/` (Qt Creator build output),
-`.qtcreator/`, `build/`. A naive `grep -r` or `find` will double-count everything in the repo.
+### Build
 
----
+The current `CMakeLists.txt` builds:
 
-## 1. What this is
+- `Landor`;
+- `landor_tests`.
 
-A top-down ASCII exploration game in **C++20, standard library only — no third-party deps**,
-engine split so it can run down to a Pi Pico. Find shards, get a key, unlock the gate, reach
-the beacon. `docs/GAMEPLAY.md` is the player-facing description; `dev-docs/DESIGN_STATE.md`
-is the authoritative technical decision record (numbered `## 1.`–`## 13.`, decisions as `D-n`,
-open questions as `Q-n`).
+GoogleTest v1.18.0 is fetched through CMake `FetchContent`.
 
-Reading order for design context: `DESIGN_STATE.md` (authoritative, owns §1 "Targets") →
-`IMPLEMENTATION.md` → `coding_rules.md` + `coding_style.md`. `README.md` is the overview but
-has known drift, see §8.
+At the reviewed head, CMake still declares C++20 and explicitly disables GoogleMock. Those
+settings predate the latest design decisions and are listed under **Pending alignment**
+below.
 
----
+### Tests
 
-## 2. Layout and per-file state
+The latest commit migrated the old hand-written geometry tests into GoogleTest and removed
+the duplicate `tests/test_geo_headers.cpp`.
 
-```
-main.cpp                     stub: boots managed heap, prints capacity. BUILDS & RUNS.
-CMakeLists.txt               TWO targets, sources listed EXPLICITLY (no globbing — a new file must
-                             be added by hand): exe `Landor` = main.cpp + listed headers, and exe
-                             `landor_tests` = the GoogleTest TU set (fetched by FetchContent, GMock
-                             off, cases registered with gtest_discover_tests). Guarded by
-                             `-DLANDOR_BUILD_TESTS`, ON by default.
-src/storage/types.hpp        landor::storage :: SourceId, Offset, Size, Error, Result, STATUS_OK
-src/world/                   ← header-only design contracts, NO .cpp files any more (§4)
-  coord.hpp        ✅ clean      landor::geo          COMPLETE, tested
-  area.hpp         ✅ clean      landor::geo          COMPLETE, tested
-  layer.hpp        ✅ clean      landor::geo           Layer concept + LayerId/layer_count/any_layer
-  orientation.hpp  ✅ clean      landor::geo           Rotation, Reflection, Orientation (2 bytes)
-  tile.hpp         ✅ clean      landor::geo           TileView (read) + TileEdit (write); CellWord
-  patch.hpp        ✅ clean      landor::geo           Patch + LayerBinding{LayerId, storage::SourceId}
-  placement.hpp    ✅ clean      landor::geo           Placement = PatchId + position + transform ref
-  patchset.hpp     ✅ clean      landor::geo           compose patches/placements into one Area
-  place.hpp        ✅ clean      landor::world         Place = narrative identity over PlacementIds
-  map.hpp          ✅ clean      landor::geo           the hub: resolve/place/at; LAYER_BITS table
-  chunk.hpp        ✅ clean      landor::world         placeholder skeleton, nothing uses it (retired by D-18…D-21)
-  cache.hpp        ✅ clean      landor::world         placeholder skeleton, nothing uses it (→ SectorCache, D-22)
+The current test target contains:
 
-  No `namespace Geo` remains anywhere in src/. The migration was cause #1 in §6.
-src/renderers/utf-8/         empty directory, nothing in it yet
-include/managed_heap/        FROZEN single-header object store (SPEC.md, USER_GUIDE.md, examples)
-tests/                       ALL GoogleTest now, one file per contract header, all three wired into
-                               landor_tests:
-                                 test_world_headers.cpp  compile tripwire + cross-header type identity
-                                 test_coord.cpp          Coord/Dir behaviour (27 tests)
-                                 test_area.cpp           Area behaviour (21 tests)
-                               The old hand-rolled mains in test_coord/test_area were migrated into
-                               themselves and deleted; test_geo_headers.cpp was absorbed by the two
-                               unit files (duplicate TEST names would collide in one binary).
-tools/checks/                check-build|tests|warnings|sanitizers|static|tidy-changed.sh
-dev-docs/                    DESIGN_STATE.md · IMPLEMENTATION.md · coding_rules.md · coding_style.md
-docs/GAMEPLAY.md             player guide
+- `tests/test_world_headers.cpp`;
+- `tests/test_coord.cpp`;
+- `tests/test_area.cpp`.
+
+The repository's latest recorded run reports 53 discovered passing tests.
+
+The final project rule is that tests mirror the source tree, so these files should
+eventually move to:
+
+```text
+tests/world/test_coord.cpp
+tests/world/test_area.cpp
 ```
 
----
+with CMake updated explicitly. That move has not happened yet.
 
-## 3. The shape of the design (enough to write code)
+### Current source contracts
 
-- **Cells** are `CellWord = std::uint16_t`, packed `[type_id:8 | height:3 | overlay:3 | stage:2]`;
-  bit-fields forbidden, shifts only. In-memory layout == on-disk ABI. Map width fixed at 256 so a row is
-  exactly one 512-byte sector → `offset = y << 9`, no division. No compression (write amplification).
-- **Layer-oriented.** `Map::at(pos)` *synthesizes* a Tile per query; there is no authoritative Tile array.
-  A Patch lacking a layer ≠ that property cannot exist there — `Map` may fill it from fallback,
-  procedural generation or live state. Keep absence distinct from "impossible".
-- **Authored vs procedural.** Files describe reusable immutable `Patch`es; `Placement`s are live occurrences
-  (position + reflection→rotation); `PatchSet` composes them; `Place` is *narrative* identity over PlacementIds.
-- **One mutation front door**, plan-then-apply, allocate before patching. Determinism covers container
-  iteration order; xorshift RNG only in logic phases.
+The substantive contracts currently under `src/` are:
 
-Don't re-derive the rest here — grep DESIGN_STATE.md for the `D-n` you need.
+```text
+src/storage/
+    types.hpp
+    storage_contract.hpp
 
----
+src/platform/storage/
+    storage_filesystem.hpp
 
-## 4. Current work in progress
+src/world/
+    coord.hpp
+    area.hpp
+    layer.hpp
+    orientation.hpp
+    tile.hpp
+    patch.hpp
+    placement.hpp
+    patchset.hpp
+    place.hpp
+    map.hpp
 
-**Header-first interface drafting for the map/world layer.** The headers are design contracts written
-to be read and argued over; they declare without defining and are *not expected to compile yet*.
-Treat a header line that fails to parse as intent, not as a bug report.
+    cache.hpp       placeholder
+    chunk.hpp       placeholder
+```
 
-**Hygiene pass of 2026-09-16** (uncommitted as of this writing; deletions are staged via `git rm`):
+`src/renderers/utf-8/` exists but is not yet implemented.
 
-- `Rotation`/`Reflection`/`Orientation` moved from `orientation.cpp` **into `orientation.hpp`**; `.cpp` deleted.
-- `Place` moved from `place.cpp` **into `place.hpp`** (keeps `namespace landor::world`, includes `placement.hpp`);
-  `.cpp` deleted. Both moves verified by compiling a throwaway TU against them.
-- Deleted every obsolete generated stub: `area/cache/chunk/layer/map/patch/patchset/placement/tile.cpp`
-  (all were `X::X() {}` against header-only or template types). `src/world` now has **zero .cpp files**.
-- Deleted `istorage.hpp` — obsolete virtual-interface experiment contradicting build-selected concrete storage.
-- `CMakeLists.txt` reduced to main.cpp + headers, with the two placeholder headers grouped under a comment.
-- `Map::place(...)` (both overloads) now return **`std::optional<PlacementId>`**: placement capacity is a
-  compile-time bound (`std::array<std::optional<placement_type>, MaxPlacements>`) so exhaustion is a
-  legitimate outcome and is visible in the type rather than hidden behind a reserved id.
+The managed heap is under:
 
-Decided most recently (2026-09-16, during the `patch.hpp` cleanup):
+```text
+include/managed_heap/
+```
 
-- **Storage vocabulary lives outside `geo`.** `src/storage/types.hpp` owns `SourceId/Offset/Size/Error/Result`;
-  `geo` must not redefine identity types. Consequence: `LayerBinding{ LayerId layer; storage::SourceId source; }`
-  — LayerId belongs to geography, SourceId belongs to storage.
-- **No invented invalid ids.** The `no_layer_source` sentinel is gone. Lookup returns
-  `const LayerBinding*` (`nullptr` = absent) via `Patch::binding(layer)` / `Patch::binding<LayerT>()`;
-  `provides()` is just `binding(...) != nullptr`. Call pattern:
-  `if (const auto* b = patch.binding<Terrain>()) storage.read(b->source, ...);`
-  Same reasoning should apply to any future lookup — prefer "may be absent" over reserved values.
+and includes its own spec, user guide, examples and implementation header.
 
----
+## World architecture represented in source
 
-## 5. Build / test reality (measured, not assumed)
+The current headers establish the following model.
 
-| check | command | result |
-|---|---|---|
-| configure | `cmake -S . -B transient/build/verify` (+ local gtest, §0) | ✅ OK, GoogleTest v1.18.0 via FetchContent |
-| full build | `cmake --build transient/build/verify -j8` | ✅ `Built target Landor` + `Built target landor_tests` — **0 errors**, clean under `-Wall -Wextra -Wpedantic` |
-| `tools/checks/check-build.sh` | `BUILD_DIR=…/transient/build/verify tools/checks/check-build.sh` | ✅ exit 0 |
-| binary runs | `./transient/build/verify/Landor` | ✅ `Memory system initialized, usable 65536 bytes.` |
-| header syntax (§0 loop) | per-header `g++ -fsyntax-only` | ✅ **15 / 15 clean** (was 8 clean · 41 errors) |
-| CTest | `ctest --test-dir transient/build/verify --output-on-failure` | ✅ `100% tests passed, 0 tests failed out of 53` (20 Area32 · 11 Coord32 · 10 Coord8 · 5 WorldHeaders · 4 Coord16 · 2 Coordinates · 1 AreaWidths) |
-| test sensitivity (mutation spot-check) | 25 targeted single-line mutations of `coord.hpp`/`area.hpp`, each rebuilt and run | ✅ **23 caught** — 19 by failing assertions, 4 by breaking compilation. The 2 survivors are *equivalent mutants*, see §6 |
-| `tools/checks/check-tests.sh` | same `BUILD_DIR` | ✅ exit 0 (used to exit 2 — "No tests were found") |
-| `tools/checks/check-static.sh` | — | ⚠️ untested since the pass; `clang-tidy` **is** installed at `/usr/bin/clang-tidy` |
+### `landor::geo::Layer`
 
-**Tests are graded, not just present.** A 25-mutation spot-check of `coord.hpp`/`area.hpp` (flip a sign, drop
-a guard, break a sort) is caught by 23 of them. Two survive and both are *equivalent* — no test can see them:
-`Area::from_coords` swapping its two x corners (the constructor sorts per axis, so the object is identical),
-and `Area::is_empty()` ignoring the y clause (y-only inversion is unreachable: both constructors and `assign()`
-sort both axes, and the empty sentinel `(1,1)/(0,0)` inverts x as well). Two gaps that the sweep *did* expose
-have been closed: an origin-centred union test that passed only because the empty sentinel sat inside it, and
-`dist_sq()` promotion, which needed extreme int16 corners to become observable.
+A layer is a type-level description of a spatial property. It has a stable `LayerId` and a
+`value_type`. It owns no storage or simulation policy.
 
-**A green build now means what it should.** `landor_tests` compiles `tests/test_world_headers.cpp`, which
-includes all 15 headers under `src/` in one TU and asserts that the cross-header aliases agree (`Map::patch_type`
-really is `Patch<>`, whose default argument really is `landor::geo::Coord32`; `storage::Storage` satisfies
-`StorageBackend`). Break a namespace, drop an
-`#include`, rename a type, and the test target fails to build — the guard the §0 (b) loop used to provide by
-hand. The legacy loop is still useful for localising *which* header broke.
+### `landor::geo::Patch`
 
-Watch out for stale precompiled headers: GCC silently prefers `foo.hpp.gch` next to an included `foo.hpp` when
-it is the first include of a TU. `src/world/{coord,area}.hpp.gch` (Sept-15, ~72 MB, gitignored but present on
-disk) shadowed the migrated headers and produced six phantom `Coord32 does not name a type` errors in
-`patch.hpp` that did not exist without them. They are moved to `transient/stale-pch/`; delete any `.gch` that
-survives under `src/` before trusting a header error.
+An immutable reusable authored region.
 
-Tooling note: the check scripts default `BUILD_DIR` to `transient/pipeline3/builds/{default,static,sanitize}`,
-which is *not* the Qt Creator tree at `transient/build/Desktop_Qt_6_11_2_Debug` (Qt 6.11.2 kit; clangd from it).
-Override with `BUILD_DIR=... tools/checks/check-build.sh` to share one tree.
+A patch has:
 
----
+- stable `PatchId`;
+- authored name;
+- natural position;
+- local rectangular extent;
+- zero or more `LayerBinding { LayerId, storage::SourceId }` entries.
 
-## 6. Breakage ledger
+Missing authored data for a layer is represented by absence of a binding, not by an
+invented invalid id.
 
-**Fixed by the §4 hygiene pass** (all were the bulk of the old 33 build errors): definitions stranded in
-`.cpp` (`Rotation`/`Reflection`/`Orientation`, `Place`), the `X::X() {}` generated scaffolds, `istorage.hpp`,
-and stale CMake entries for deleted files.
+### `landor::geo::Placement`
 
-**Cause #1 — FIXED (uncommitted).** The namespace migration `Geo` → `landor::geo` is done by moving
-`coord.hpp` and `area.hpp` into `landor::geo`; the placeholder stubs `chunk.hpp`/`cache.hpp` went to
-`landor::world` with them (they are world-layer containers, and `Chunk` is retired by D-18…D-21 anyway).
-No bridging `using` declarations were added: two namespaces for one subsystem was the bug, not the shape,
-and D-08 already leans to `landor::geo`. All 41 errors disappeared with it — no other source change was
-needed, which is the strongest evidence the migration was the single cause.
+One live occurrence of a patch.
 
-**Structural gap — CLOSED.** `tests/test_world_headers.cpp` is the "includes everything" TU described above,
-registered through `gtest_discover_tests()`. A `check-headers.sh` script is therefore optional; if one is
-wanted later it should shell out to §0 (b) purely to name the offending header faster.
+It owns:
 
-**Fixed while migrating the tests:** `Coord::rotate_90ccw()` / `rotate_90cw()` built their result with
-`T{-m_y}` / `T{-m_x}`, i.e. a braced init holding an `int`. For the narrow scalars (`Coord8`, `Coord16`) that
-is a narrowing conversion: GCC diagnosed it, **clang rejects it outright**, and nothing instantiated those two
-functions for `Coord8` before the migrated tests did. Both now use `static_cast<T>(-m_y)`, matching how
-`operator-` and `rotate_180()` already did it in the same file.
+- `PlacementId`;
+- `PatchId`;
+- current position;
+- current `Orientation`.
 
-**Fixed alongside, found while writing the neighbour tests:** `Coord::neighbour8(5)` returned due **west**
-instead of north-west (`dy = -T{0}` in the octant table, so north and west were not distinct neighbours of a
-cell). Corrected in `coord.hpp`; `Coord32.Neighbour8CoversEveryOctantExactlyOnce` pins all eight octants and
-the invariant that each step is exactly one king-move away, verified to fail against the pre-fix table.
+Transform order is:
 
-Still-open design detail inside `map.hpp`: it forward-declares **`landor::geo::Storage`** and holds
-`Storage& m_storage` (same for `Generator&`). Per the current architecture the concrete storage type is
-chosen by the platform header and lives in `landor::storage` (`using Storage = StorageFilesystem;` etc.),
-so `Map` should consume `storage::Storage&` rather than invent its own `geo::Storage`. Left untouched in
-the hygiene pass on purpose — it depends on the platform-selected storage header, which does not exist yet.
+```text
+reflection -> rotation -> translation
+```
 
----
+Placement is deliberately unaware of narrative/story identity.
 
-## 7. Conventions card (details in dev-docs/coding_rules.md + coding_style.md)
+### `landor::geo::PatchSet`
 
-- Namespaces: `landor::geo` (authored geometry/contracts), `landor::world` (live/place-level objects),
-  `landor::storage` (byte-side vocabulary). Legacy `Geo` is gone from `src/`; `landor::*` only.
-  Note `.clang-format` claims to be the formatting authority but **no** header in the repo is currently
-  formatter-clean (`map.hpp`: 297 violations) — do not reformat wholesale, format only what you create.
-- Headers carry the design reasoning as comments — write the *why*, keep it, don't strip comments to "clean up".
-- `[[nodiscard]]` on lookup/status functions; declaration order is meaningful documentation.
-- Members `m_`-prefixed; aligned declarations in blocks (`LayerId           layer;`).
-- No exceptions on hot paths — `storage::Result` carries `Error` + `bytes_transferred`.
-- CMake lists sources explicitly: **new file ⇒ edit CMakeLists.txt**, or it silently isn't built.
-- Standard library only. Nothing new gets vendored without a decision record entry.
+An immutable composition recipe with roles, patch candidates and minimum/maximum counts.
 
----
+Selection/composition is deterministic policy outside `PatchSet`.
 
-## 8. Documentation drift (already discovered — don't re-discover)
+### `landor::world::Place`
 
-`README.md` says / implies, reality differs:
+A story-facing identity over one or more `PlacementId`s.
 
-| README claim | reality |
-|---|---|
-| `managed-heap/` at repo root | `include/managed_heap/` |
-| refers to `../AGENTS.md` | does not exist (no AGENTS.md/CLAUDE.md anywhere) |
-| tests use GoogleTest | now true — every test runs through CTest (see §2, §5) |
-| `src/game/`, `src/render/`, `src/actor/`, `src/npc/`, `src/host/` | absent; only `src/world`, `src/storage`, `src/renderers/utf-8` (empty) |
-| `assets/`, `tools/gen_starter_map.py` | absent |
+Actors, schedules, ownership, dialogue and missions should be able to refer to a stable
+place without knowing which authored patch or transform implements it.
 
-Design docs also lag code in places (e.g. wording still describing `Patch::source()` lookups after §4).
-When code and doc disagree, note it rather than silently reconciling.
+### `landor::geo::Tile`
 
----
+A synthetic value.
 
-## 9. Open threads / plausible next tasks
+`Tile<Layers...>` contains owned copies of the resolved values for the layers supported by
+that map/build. Modifying the returned tile does not mutate the map.
 
-- Next up per plan: the **platform-selected storage header** (`landor::storage::Storage` = filesystem / SD /
-  ROM), then repoint `Map` at it (§6 last paragraph).
-- ~~Resolve cause #1, the `Geo` → `landor::geo` bridge~~ — done, see §6. Revisit only if D-08 is reopened.
-- ~~Guard the headers / wire tests into CMake~~ — done (`tests/test_world_headers.cpp`).
-- ~~Convert the legacy hand-rolled mains~~ — done: `test_coord.cpp`/`test_area.cpp` are GoogleTest now and
-  `test_geo_headers.cpp` is absorbed; 53 tests run under `ctest`. When new world code lands, keep the rule:
-  **one test file per contract header, added to `landor_tests` explicitly** (CMake does not glob).
-- **`Coord::manhattan()` / `chebyshev()` are not usable in constant expressions on clang.** They call
-  `std::abs` on the promoted difference; glibc declares `abs(int)` non-constexpr and clang refuses the call in
-  a `static_assert`, while GCC constant-folds it anyway. So "the contracts are constexpr throughout" is true
-  on the current compiler only. Fixing it means computing the magnitude inside the header (`v < 0 ? -v : v`,
-  being deliberate about the most-negative value) instead of `std::abs`; that changes a header the project
-  calls COMPLETE, so it needs a decision, not a quiet edit. Left as-is; the runtime path is tested and the
-  `static_assert` is deliberately absent (see the comment in `tests/test_coord.cpp`).
-- Where do coordinate z-components live? `landor::geo::Coord<T>` is **2D (x, y)** but `tile.hpp`/`map.hpp` commentary
-  relies on `z == -1` meaning the ground/base plane. Unresolved tension, affects `TileView::base()`.
-- Consistency sweep when convenient: `Map::set_position/set_rotation/set_reflection/set_orientation` return
-  bare `bool` without `[[nodiscard]]`, now inconsistent with `place()` returning `std::optional`; decide the
-  house style for "may fail" (a shared Landor result type would settle both).
-- Same "storage owns the identity, geo owns the relationship" audit for other `geo` types (`Placement`,
-  `PatchSet`) — check for locally redefined ids.
-- `chunk.hpp`/`cache.hpp` remain placeholder skeletons (now `landor::world`) waiting on their interface
-  drafts — candidates for deletion rather than drafting, given D-18…D-21 retire `Chunk` outright.
+There is no authoritative stored array of complete tiles.
 
----
+### `landor::geo::Map`
 
-## 10. How to keep this file honest
+The logical spatial surface.
 
-- Update the §5 numbers and the stamp line at the top whenever you touch build wiring or finish a header.
-- A change this size is worth a commit; if you don't commit, at least bump `verified on`.
-- Keep it under ~200 lines. It earns its place by being *skimmed*; long-form reasoning belongs in dev-docs.
-- Never paste DESIGN_STATE.md content in here — link the `D-n`/`Q-n` instead.
-- Note for future sessions: the owner often works **concurrently** in Qt Creator / another agent session.
-  Re-check `git status` and file mtimes before editing, and diff against this file's stamp first.
+The current contract says that `Map`:
+
+- owns live placements;
+- keeps authored patch descriptors by non-owning span;
+- resolves layers independently;
+- synthesizes complete tile values;
+- may use a disposable synthetic tile cache;
+- routes placement mutation through `Map` so derived cached answers can be invalidated.
+
+The implementation of `value()`, `at()`, placement mutation and storage integration is
+still pending.
+
+## Storage architecture represented in source
+
+`landor::storage::StorageBackend` is a compile-time concept with logical-object operations:
+
+```text
+read(SourceId, Offset, span<byte>)
+write(SourceId, Offset, span<const byte>)
+size(SourceId, Size&)
+```
+
+Operations are whole-range success/failure. Paths, file handles, sectors, pages, erase
+blocks and other physical details remain below the boundary.
+
+`StorageFilesystem` is the current concrete host implementation contract.
+
+It exposes:
+
+```cpp
+using Storage = StorageFilesystem;
+```
+
+The build is intended to select the file that provides the concrete `Storage` alias.
+
+## Pending alignment after the latest design discussion
+
+These are **known mismatches**, not invitations to re-design the architecture.
+
+### C++23
+
+Current CMake and `.clang-format` still say C++20.
+
+Required direction:
+
+- C++23 project;
+- supported portable subset validated on supported embedded toolchains;
+- `std::expected` available for recoverable value-or-error results;
+- aggressive use of `constexpr`/`consteval` where it improves clarity.
+
+### Exceptions and RTTI
+
+Required direction:
+
+- no exceptions in Landor code;
+- no RTTI;
+- no `dynamic_cast`;
+- no `typeid`;
+- GoogleTest/GoogleMock themselves may use their normal implementation facilities.
+
+CMake should eventually enforce the Landor-side contract.
+
+### GoogleMock
+
+Current CMake sets `BUILD_GMOCK OFF`.
+
+Required direction: GoogleMock is allowed and should not be forcibly disabled.
+
+### Warning policy
+
+Required direction: aggressive compiler warnings, warning-free Landor code, warnings as
+errors.
+
+Third-party dependencies should not inherit Landor's warning policy.
+
+### Formatting
+
+Current `.clang-format` attaches braces to control statements.
+
+Required direction:
+
+```cpp
+if (condition)
+{
+    ...
+}
+
+for (...)
+{
+    ...
+}
+
+while (...)
+{
+    ...
+}
+```
+
+`.clang-format` should be changed so the formatter itself is authoritative.
+
+### Enum values
+
+Some current enums still use lowercase values, for example the storage `Error` enum.
+
+Required direction: scoped enum values use PascalCase, following the Qt naming convention:
+
+```cpp
+Error::InvalidSource
+Rotation::None
+Dir::East
+```
+
+### Error/result style
+
+`Map::place()` currently returns `std::optional<PlacementId>`.
+
+The latest design direction avoids `std::optional` as a general failure mechanism.
+Capacity exhaustion is a normal bounded-system outcome and should eventually use the
+clearest domain representation; `std::expected` is preferred when a value and meaningful
+recoverable reason are both needed.
+
+Do not churn APIs merely to remove `optional`; change them when implementing the actual
+contract and the better domain result is clear.
+
+### Storage seam in `Map`
+
+`map.hpp` currently forward-declares `Storage` in `landor::geo`, while the storage
+contract now lives in `landor::storage`.
+
+The intended seam is for common code to use the build-selected `landor::storage::Storage`
+type. This still needs to be wired cleanly.
+
+### Test layout
+
+Current geometry tests are GoogleTest but still live directly under `tests/`.
+
+Final rule: mirror `src/` under `tests/`.
+
+### Managed heap policy
+
+The managed heap is an imported component from another project.
+
+Current rule:
+
+- use fixed-capacity/value storage first;
+- use managed heap only when dynamic allocation is genuinely unavoidable;
+- do not modify the component casually;
+- defects or required changes should be handled explicitly and separately;
+- whether it eventually becomes a submodule/subrepo is still undecided.
+
+### Logging
+
+No Landor logger is implemented yet.
+
+The intended design is recorded in `DESIGN_STATE.md` and `DESIGN_DECISIONS.md`: compile-out
+logging grades, RAII function tracing, monotonic event timestamps and serialized host/UART
+output through bounded transport.
+
+## Near-term code work
+
+A sensible sequence from the current tree is:
+
+1. align CMake and `.clang-format` with the settled project rules;
+2. move tests into the mirrored `tests/world/` layout;
+3. normalize scoped enum spelling as affected code is touched;
+4. wire `Map` to the build-selected storage type;
+5. implement and test the filesystem storage backend;
+6. implement the first real `Map` resolution slice without prematurely adding cache or
+   procedural-generation machinery;
+7. add logging only when a real diagnostic consumer needs it.
+
+Keep each step small and independently testable.
