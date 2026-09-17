@@ -3,23 +3,51 @@
 #include "platform/storage/storage_filesystem.hpp"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <span>
 #include <string>
 #include <unistd.h>
+#include <vector>
 
 
 namespace
 {
 
 using landor::storage::Error;
+using landor::storage::Offset;
 using landor::storage::Result;
 using landor::storage::Size;
 using landor::storage::SourceId;
 using landor::storage::Storage;
+
+
+// Distinct deterministic byte pattern; 37 is coprime with 251, so the first
+// 251 bytes are all different and a one-byte shift is always visible.
+std::vector<std::byte> make_pattern(const std::size_t count)
+{
+    std::vector<std::byte> pattern(count);
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        pattern[i] = static_cast<std::byte>((i * 37 + 11) % 251);
+    }
+
+    return pattern;
+}
+
+
+// A copy of one contiguous range of a pattern.
+std::vector<std::byte> sub_range(
+    const std::vector<std::byte>& pattern, const std::size_t offset, const std::size_t count)
+{
+    const auto first = pattern.begin() + static_cast<std::ptrdiff_t>(offset);
+    const auto last = first + static_cast<std::ptrdiff_t>(count);
+    return {first, last};
+}
 
 
 class StorageFilesystemTest : public ::testing::Test
@@ -63,6 +91,17 @@ protected:
         std::ofstream stream(m_root_path / name, std::ios::binary | std::ios::trunc);
         ASSERT_TRUE(static_cast<bool>(stream));
         stream.write(data.data(), static_cast<std::streamsize>(data.size()));
+        ASSERT_TRUE(static_cast<bool>(stream));
+    }
+
+
+    void write_bytes(const std::string_view name, const std::span<const std::byte> bytes)
+    {
+        std::ofstream stream(m_root_path / name, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(static_cast<bool>(stream));
+        stream.write(
+            reinterpret_cast<const char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
         ASSERT_TRUE(static_cast<bool>(stream));
     }
 
@@ -137,6 +176,200 @@ TEST_F(StorageFilesystemTest, ReportsOutOfRangeForAFileLargerThanStorageSize)
 
     Size out{};
     const Result result = storage.size(SourceId {3}, out);
+
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error, Error::out_of_range);
+}
+
+
+TEST_F(StorageFilesystemTest, ReadsTheCompleteFile)
+{
+    const std::vector<std::byte> pattern = make_pattern(64);
+    write_bytes("present.layer", std::span<const std::byte> {pattern});
+
+    const Storage storage = make_storage();
+
+    std::vector<std::byte> destination(pattern.size());
+    const Result result =
+        storage.read(SourceId {0}, Offset {0}, std::span<std::byte> {destination});
+
+    EXPECT_TRUE(result);
+    EXPECT_EQ(result.error, Error::none);
+    EXPECT_EQ(destination, pattern);
+}
+
+
+TEST_F(StorageFilesystemTest, ReadsAByteRangeFromTheMiddleOfTheFile)
+{
+    const std::vector<std::byte> pattern = make_pattern(128);
+    write_bytes("present.layer", std::span<const std::byte> {pattern});
+
+    const Storage storage = make_storage();
+
+    constexpr std::size_t offset = 40;
+    constexpr std::size_t count = 33;
+
+    std::vector<std::byte> destination(count);
+    const Result result =
+        storage.read(SourceId {0}, static_cast<Offset>(offset), std::span<std::byte> {destination});
+
+    EXPECT_TRUE(result);
+    EXPECT_EQ(result.error, Error::none);
+    EXPECT_EQ(destination, sub_range(pattern, offset, count));
+}
+
+
+TEST_F(StorageFilesystemTest, ReadsTheFinalByteRangeEndingExactlyAtEOF)
+{
+    const std::vector<std::byte> pattern = make_pattern(100);
+    write_bytes("present.layer", std::span<const std::byte> {pattern});
+
+    const Storage storage = make_storage();
+
+    // Final byte only, ending exactly at EOF.
+    {
+        std::vector<std::byte> destination(1);
+        const Result result =
+            storage.read(SourceId {0}, Offset {99}, std::span<std::byte> {destination});
+
+        EXPECT_TRUE(result);
+        EXPECT_EQ(result.error, Error::none);
+        EXPECT_EQ(destination, sub_range(pattern, 99, 1));
+    }
+
+    // Final four bytes, ending exactly at EOF.
+    {
+        std::vector<std::byte> destination(4);
+        const Result result =
+            storage.read(SourceId {0}, Offset {96}, std::span<std::byte> {destination});
+
+        EXPECT_TRUE(result);
+        EXPECT_EQ(result.error, Error::none);
+        EXPECT_EQ(destination, sub_range(pattern, 96, 4));
+    }
+}
+
+
+TEST_F(StorageFilesystemTest, RejectsARangeExtendingOneByteBeyondEOF)
+{
+    write_file("present.layer", 64);
+
+    const Storage storage = make_storage();
+
+    // Offset 63 plus two bytes ends one byte past the end of the source.
+    std::vector<std::byte> destination(2, std::byte {0xEE});
+    const Result result =
+        storage.read(SourceId {0}, Offset {63}, std::span<std::byte> {destination});
+
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error, Error::out_of_range);
+
+    // No partial success is exposed: the destination is untouched.
+    for (const auto byte : destination)
+    {
+        EXPECT_EQ(byte, std::byte {0xEE});
+    }
+}
+
+
+TEST_F(StorageFilesystemTest, RejectsAnOffsetBeyondEOF)
+{
+    write_file("present.layer", 64);
+
+    const Storage storage = make_storage();
+
+    std::vector<std::byte> destination(8);
+    const Result result =
+        storage.read(SourceId {0}, Offset {65}, std::span<std::byte> {destination});
+
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error, Error::out_of_range);
+}
+
+
+TEST_F(StorageFilesystemTest, AcceptsAnEmptyDestinationAtOrBeforeEOF)
+{
+    write_file("present.layer", 64);
+    write_file("empty.layer", 0);
+
+    const Storage storage = make_storage();
+
+    const std::span<std::byte> empty {};
+
+    // Exactly at EOF.
+    const Result at_eof = storage.read(SourceId {0}, Offset {64}, empty);
+    EXPECT_TRUE(at_eof);
+    EXPECT_EQ(at_eof.error, Error::none);
+
+    // Before EOF.
+    const Result before_eof = storage.read(SourceId {0}, Offset {10}, empty);
+    EXPECT_TRUE(before_eof);
+    EXPECT_EQ(before_eof.error, Error::none);
+
+    // Empty source, offset at its EOF.
+    const Result empty_source = storage.read(SourceId {2}, Offset {0}, empty);
+    EXPECT_TRUE(empty_source);
+    EXPECT_EQ(empty_source.error, Error::none);
+}
+
+
+TEST_F(StorageFilesystemTest, RejectsAnEmptyDestinationBeyondEOF)
+{
+    write_file("present.layer", 64);
+
+    const Storage storage = make_storage();
+
+    const std::span<std::byte> empty {};
+    const Result result = storage.read(SourceId {0}, Offset {65}, empty);
+
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error, Error::out_of_range);
+}
+
+
+TEST_F(StorageFilesystemTest, RejectsAReadForASourceIdOutsideTheSourceTable)
+{
+    const Storage storage = make_storage();
+
+    std::vector<std::byte> destination(8);
+    for (const SourceId source : {SourceId {4}, SourceId {0xFFFF}})
+    {
+        const Result result =
+            storage.read(source, Offset {0}, std::span<std::byte> {destination});
+        EXPECT_FALSE(result);
+        EXPECT_EQ(result.error, Error::invalid_source);
+    }
+}
+
+
+TEST_F(StorageFilesystemTest, ReportsReadFailedOnReadWhenTheConfiguredFileIsMissing)
+{
+    const Storage storage = make_storage();
+
+    std::vector<std::byte> destination(8);
+    const Result result =
+        storage.read(SourceId {1}, Offset {0}, std::span<std::byte> {destination});
+
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error, Error::read_failed);
+}
+
+
+TEST_F(StorageFilesystemTest, ReportsOutOfRangeOnReadForAFileLargerThanStorageSize)
+{
+    const int fd = ::open((m_root_path / "huge.layer").c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    ASSERT_GE(fd, 0);
+
+    // Sparse file: apparent size 2^32 bytes, no actual blocks allocated.
+    const std::int64_t byte_count = static_cast<std::int64_t>(std::numeric_limits<Size>::max()) + 1;
+    ASSERT_EQ(0, ::ftruncate(fd, byte_count));
+    ASSERT_EQ(0, ::close(fd));
+
+    const Storage storage = make_storage();
+
+    std::vector<std::byte> destination(16);
+    const Result result =
+        storage.read(SourceId {3}, Offset {0}, std::span<std::byte> {destination});
 
     EXPECT_FALSE(result);
     EXPECT_EQ(result.error, Error::out_of_range);
