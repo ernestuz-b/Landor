@@ -45,6 +45,39 @@ A runtime source:
 
 The architecture must not assume that authored and runtime sources are colocated or even writable through the same physical storage implementation.
 
+## Cache is the live working state
+
+Layer files are backing stores. They are **not** intended to be loaded as complete in-memory world images.
+
+The live simulation/game state is the resident layer data held by the Cache. Simulations and gameplay operate on that resident state.
+
+The normal flow is:
+
+```text
+cache hit
+    -> use resident layer state directly
+
+cache miss
+    -> resolve runtime/authored/procedural source
+    -> read only the required backing ranges
+    -> populate the required Cache layer plane/Chunk
+    -> continue using resident state
+```
+
+A `.layer` source may be much larger than available RAM. Nothing in the Map architecture may require a whole authored or runtime layer to be resident at once.
+
+Only small source metadata needed for direct addressing — such as dimensions, natural position, `data_offset`, and row stride — needs to remain available after a source header has been parsed.
+
+For runtime mutation, the direction is reversed:
+
+```text
+simulation/game changes resident state
+    -> resident state becomes dirty
+    -> later write-back updates the corresponding runtime-source ranges
+```
+
+The Cache therefore mediates simulation state; the files provide persistence/backing storage.
+
 ## Runtime state belongs to the live world
 
 A Patch is reusable authored data. Several Placements may instantiate the same Patch.
@@ -121,6 +154,8 @@ simulation/game mutation
     -> authored source remains untouched
 ```
 
+Write-back should operate on the required runtime-source ranges rather than requiring the complete layer to be assembled or rewritten in memory.
+
 Eviction must not discard dirty state. Before a dirty layer region can be evicted, its required runtime state must be safely persisted or eviction must fail/defer.
 
 The exact granularity of dirty tracking and write-back — cell, range, Chunk, layer plane, or another measured choice — is not pinned yet.
@@ -165,6 +200,8 @@ authored: create/edit offline -> ship -> read only
 runtime:  create/materialize while running -> mutate -> write back -> reload later
 ```
 
+In both cases, normal gameplay access is incremental. A source header is parsed to establish direct addressing, then Cache fills and runtime write-back use bounded byte ranges. Whole-file loading is not part of the runtime model.
+
 ## Deliberately deferred
 
 This document does not yet define:
@@ -180,4 +217,4 @@ This document does not yet define:
 - exact authored Placement precedence;
 - procedural/default fallback API.
 
-Those are implementation decisions to make with concrete Map persistence requirements. The contract already fixed is simpler: **authored files are immutable; runtime files are writable overlays/materialized state; both use the same `.layer` format; runtime storage may be physically separate from authored storage.**
+Those are implementation decisions to make with concrete Map persistence requirements. The contract already fixed is simpler: **authored files are immutable; runtime files are writable overlays/materialized state; both use the same `.layer` format; runtime storage may be physically separate from authored storage; and normal gameplay accesses both incrementally through the Cache rather than loading whole files into memory.**
