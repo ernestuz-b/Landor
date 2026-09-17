@@ -20,8 +20,6 @@
 namespace landor::geo
 {
 
-class Generator;
-
 using MapId = std::uint16_t;
 
 
@@ -210,21 +208,19 @@ public:
      *
      * Patch descriptors and Storage outlive the Map. Map owns neither.
      *
-     * Generator supplies values where no authored or materialised value
-     * exists. It may return a constant default for some layers and procedural
-     * values for others.
+     * Procedural/default fallback remains part of layer resolution, but Map
+     * does not store a generator object until that contract is defined by a
+     * concrete implementation need.
      */
     constexpr Map(
         MapId id,
         area_type area,
         std::span<const patch_type> patches,
-        storage::Storage& storage,
-        Generator& generator) noexcept
+        storage::Storage& storage) noexcept
         : m_id(id),
           m_area(area),
           m_patches(patches),
-          m_storage(storage),
-          m_generator(generator)
+          m_storage(storage)
     {
     }
 
@@ -408,8 +404,8 @@ public:
 
 private:
     /**
-     * Resolve LayerT from authored Placements, working state and Generator
-     * fallback when Cache needs to fill a missing Chunk.
+     * Resolve LayerT from authored Placements, working state and the
+     * procedural/default fallback policy once that policy is defined.
      *
      * This source-resolution operation is separate from Tile presentation.
      */
@@ -466,12 +462,8 @@ private:
      */
     std::span<const patch_type> m_patches;
 
-    /*
-     * Storage owns the persistent backing data. Generator supplies the
-     * otherwise empty parts of the logical Map.
-     */
+    /* Storage owns the persistent backing data. */
     storage::Storage& m_storage;
-    Generator&        m_generator;
 
     /*
      * Placements are live Map state. std::optional gives us fixed-capacity

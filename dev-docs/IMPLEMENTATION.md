@@ -277,10 +277,11 @@ The Cache is mutable because logically-const world reads may populate residency 
 Map borrows:
 
 - authored Patch catalogue;
-- Storage object;
-- Generator/fallback source.
+- Storage object.
 
 The Storage dependency is the build-selected `landor::storage::Storage` alias exposed by the selected platform header (currently `StorageFilesystem`); `map.hpp` includes that header directly rather than carrying a geography-local `Storage` type.
+
+Map does not currently borrow or store a `Generator`. Procedural/default fallback remains part of the intended per-layer resolution order, but no fallback-object API is defined yet. Introduce one only when concrete Map resolution requirements establish the useful contract.
 
 ### Access
 
@@ -300,18 +301,18 @@ There is deliberately no public unchecked `Map::operator[]` path.
 
 ### Residency population
 
-The intended next implementation seam is:
+The intended implementation seam is:
 
 ```text
 Map request
     -> Cache residency check
     -> determine missing Layer Chunk(s)
     -> resolve source/value contribution through Map rules
-    -> Storage / Generator / working state as appropriate
+    -> Storage / working state / procedural-default fallback as defined
     -> Cache::fill<LayerT>()
 ```
 
-Do not invent a source-file byte layout if the repository does not already define how a spatial layer position maps to a byte range.
+Neither the authored source-to-byte mapping nor the procedural/default fallback API is currently defined strongly enough to implement that path honestly. Do not invent either inside `Map::value()` merely to make the method compile.
 
 ### Per-layer resolution
 
@@ -466,14 +467,15 @@ Treat these as separate reviewable changes.
 
 ## 20. Next implementation slice
 
-The architecture is now sufficiently defined to begin Map integration.
+The Map constructor and storage dependency are now concrete enough for ordinary instantiation, but residency population still has two missing contracts.
 
 The recommended order is:
 
-1. implement checked `value<LayerT>()` / residency for the smallest source path that is actually defined;
-2. implement checked `at()` by ensuring required layers then calling `Cache::tile()`;
-3. pin overlap/precedence semantics with tests as source resolution becomes concrete;
-4. add replacement/write-back policy only after the no-eviction path is proven;
-5. introduce `Region` only when a simulation needs it.
+1. pin the authored source/layer/spatial-coordinate → byte-offset mapping and the procedural/default fallback contract required to fill a missing layer Chunk;
+2. implement checked `value<LayerT>()` / residency using those explicit contracts;
+3. implement checked `at()` by ensuring required layers then calling `Cache::tile()`;
+4. pin overlap/precedence semantics with tests as source resolution becomes concrete;
+5. add replacement/write-back policy only after the no-eviction path is proven;
+6. introduce `Region` only when a simulation needs it.
 
-If the source-to-byte mapping required for Chunk loading is not defined, stop and report that missing contract rather than inventing a storage format.
+Do not create a placeholder object merely to stand in for either missing contract.
