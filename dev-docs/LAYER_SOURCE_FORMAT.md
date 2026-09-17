@@ -1,14 +1,16 @@
 # Landor — Layer Source File Format
 
-This document defines the current authored on-disk format for one Patch layer source.
+This document defines the current on-disk format for one layer source.
+
+The same format is used by both immutable authored layer files and writable runtime/materialized layer files. Their different ownership, resolution, and write-back roles are defined in `LAYER_STORAGE_MODEL.md`.
 
 The first format is intentionally dense and simple. Sparse coordinate-record variants may be considered later, but are **not** part of version 1.0.
 
 ## File naming
 
-One authored layer source belongs to one Patch and one Layer.
+For authored data, one layer source belongs to one Patch and one Layer.
 
-The current filename convention is:
+The current authored filename convention is:
 
 ```text
 <PatchName>.<LayerName>.layer
@@ -22,7 +24,19 @@ GoodMagePalace.height.layer
 GoodMagePalace.fire.layer
 ```
 
-The filename is a platform/editor-facing convention. Runtime geography still refers to the backing source through `storage::SourceId`; filesystem paths do not leak into `Patch` or `Map`.
+Runtime files use the same `.layer` byte format, but their naming/identity convention is deliberately not pinned yet. Runtime state belongs to a live world occurrence/area, and Patch name alone is not sufficient when the same Patch has several Placements.
+
+The filename is a platform/editor-facing convention. Runtime geography still refers to backing sources through `storage::SourceId`; filesystem paths do not leak into `Patch` or `Map`.
+
+## Source roles
+
+The byte format does not distinguish authored from runtime data. The role comes from how the source is registered and used.
+
+Authored sources are immutable and may live on read-only storage. Runtime sources are writable persistence for live world changes and may live on a completely separate filesystem, device, root, or Storage backend.
+
+Runtime write-back never modifies an authored source.
+
+See `LAYER_STORAGE_MODEL.md` for the lifecycle and resolution rules.
 
 ## Overall layout
 
@@ -108,7 +122,9 @@ For version 1.0, the dense data section contains exactly `height` rows and exact
 
 ### `P` — natural position
 
-`P` gives the authored Patch natural position.
+`P` gives the natural position associated with the represented layer extent.
+
+For an authored Patch source, this is the authored Patch natural position.
 
 Example:
 
@@ -124,7 +140,9 @@ P:0x78 0x50
 
 Integer metadata may use ordinary decimal notation or `0x`-prefixed hexadecimal notation.
 
-The natural position does not participate in the physical byte offset within the layer file. Data coordinates are Patch-local.
+The natural position does not participate in the physical byte offset within the layer file. Data coordinates within the file are local to the represented layer extent.
+
+The exact association between a runtime source and its live Placement/world area is intentionally defined outside this byte-format document.
 
 ### Future metadata
 
@@ -165,13 +183,17 @@ Each cell occupies exactly one byte on disk in version 1.0.
 The generic format reserves:
 
 ```text
-0x20  ' '   no authored contribution at this coordinate
+0x20  ' '   no contribution from this source at this coordinate
 0x0A  '\n'  row terminator; never a cell value
 ```
 
-A space does **not** mean runtime value zero. It means that this authored Patch contributes nothing for this layer at that coordinate, allowing normal Map resolution to continue to another authored contribution, working state, or procedural/default fallback.
+A space does **not** mean runtime value zero. It means that this source contributes nothing at that coordinate and resolution may continue to another source.
 
-Any other non-LF byte is an authored layer value. Its meaning belongs to that Layer, not to the generic file format.
+For an authored source this means "no authored contribution". For a runtime source it means "no runtime override".
+
+If a Layer needs an explicit semantic value meaning empty, zero, absent, burned, dry, and so on, that value must have its own non-space Layer encoding. It must not overload the source-level no-contribution marker.
+
+Any other non-LF byte is a layer value. Its meaning belongs to that Layer, not to the generic file format.
 
 Data bytes are literal. In particular, leading and trailing spaces in a row are cells and must never be trimmed.
 
@@ -187,7 +209,7 @@ row_stride = width + 1
 
 because every row has `width` cell bytes followed by one LF.
 
-For Patch-local coordinate `(x, y)`:
+For source-local coordinate `(x, y)`:
 
 ```text
 offset = data_offset + y * row_stride + x
@@ -202,7 +224,7 @@ with:
 
 This is the physical `storage::Offset` of that cell in the backing source.
 
-The natural position `P` is not added here. Placement/orientation logic maps world coordinates to Patch-local coordinates before this file-offset calculation is used.
+The natural position `P` is not added here. Higher-level placement/runtime association maps world coordinates to source-local coordinates before this file-offset calculation is used.
 
 ## Size and structural validation
 
@@ -229,21 +251,23 @@ A strict version 1.0 reader can validate that:
 - the final row also terminates with `0x0A`;
 - no extra bytes follow the final row.
 
-## Relationship to Patch and Storage
+## Relationship to Map and Storage
 
-`LayerBinding::source` remains an opaque `storage::SourceId`.
-
-The generic Storage interface only supplies bytes. It does not parse layer metadata and does not know Patch geometry.
+The generic Storage interface only supplies bytes. It does not parse layer metadata and does not know Patch, Placement, runtime, or simulation semantics.
 
 A mapping/source reader above Storage is responsible for:
 
 1. locating the metadata terminator;
 2. parsing the metadata it needs;
 3. validating dimensions/structure;
-4. translating a Patch-local coordinate into the direct byte offset;
-5. reading authored cell bytes into the layer-oriented Cache/Chunk path.
+4. translating a source-local coordinate into the direct byte offset;
+5. reading source cell bytes into the layer-oriented Cache/Chunk path.
 
-The same format can therefore be backed by a host filesystem, SD card, flash, ROM, or another Storage implementation without changing Map/Patch semantics.
+A corresponding runtime writer uses the same layout when persisting mutable layer state. It targets runtime storage only; authored files are never modified by write-back.
+
+Authored and runtime storage are allowed to be physically independent. A read-only authored filesystem plus a writable save/runtime filesystem is a normal supported architecture.
+
+The same byte format can therefore be backed by a host filesystem, SD card, flash, ROM, or another Storage implementation without changing Map/layer semantics.
 
 ## Deliberately deferred
 
@@ -255,6 +279,10 @@ Version 1.0 does not define:
 - multi-byte layer values;
 - layer-specific metadata records;
 - unknown-record compatibility policy;
-- cache replacement or write-back representation.
+- runtime source naming/identity;
+- runtime source creation/registration API;
+- dirty tracking granularity;
+- write-back scheduling or crash-consistency policy;
+- cache replacement representation.
 
-Those can be added only when there is a concrete need. The dense format above is the current authored layer source contract.
+Those can be added only when there is a concrete need. The dense format above is the current layer source contract for both authored and runtime persistence.
