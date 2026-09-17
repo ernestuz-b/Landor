@@ -226,6 +226,25 @@ This is the physical `storage::Offset` of that cell in the backing source.
 
 The natural position `P` is not added here. Higher-level placement/runtime association maps world coordinates to source-local coordinates before this file-offset calculation is used.
 
+## Incremental access model
+
+A `.layer` file is a random-access backing source. **Normal gameplay must not require loading the complete file into RAM.**
+
+The intended access pattern is:
+
+```text
+Storage source
+    -> read metadata incrementally until the first empty line
+    -> retain parsed V / D / P, data_offset and row_stride
+    -> use direct offsets for later Cache fills
+```
+
+After the header has been parsed, a Cache miss should read only the row fragments or ranges required to populate the requested layer Chunk/plane. The fixed-width dense layout exists specifically so those reads can be calculated directly.
+
+A source reader may keep small parsed source metadata, but it must not require an in-memory copy of the complete layer grid.
+
+The same rule applies in reverse to runtime persistence: dirty resident data is written back to the corresponding ranges of the writable runtime source. Runtime write-back does not require rewriting or holding the whole layer merely because the on-disk format is dense.
+
 ## Size and structural validation
 
 Once metadata has been parsed, a version 1.0 dense source has expected data size:
@@ -240,7 +259,11 @@ and therefore expected total size:
 expected_size = data_offset + data_size
 ```
 
-A strict version 1.0 reader can validate that:
+Normal gameplay opening can validate the metadata and compare the Storage-reported source size with `expected_size` without scanning the complete grid.
+
+When row data is actually read, the reader can also verify the encountered row terminator(s) as part of that bounded read.
+
+A separate strict/offline validator may scan the whole source and verify that:
 
 - the first empty line exists;
 - `V`, `D`, and `P` are valid;
@@ -251,17 +274,19 @@ A strict version 1.0 reader can validate that:
 - the final row also terminates with `0x0A`;
 - no extra bytes follow the final row.
 
+Whole-file structural scanning is **not** a prerequisite for normal gameplay access.
+
 ## Relationship to Map and Storage
 
 The generic Storage interface only supplies bytes. It does not parse layer metadata and does not know Patch, Placement, runtime, or simulation semantics.
 
 A mapping/source reader above Storage is responsible for:
 
-1. locating the metadata terminator;
-2. parsing the metadata it needs;
-3. validating dimensions/structure;
-4. translating a source-local coordinate into the direct byte offset;
-5. reading source cell bytes into the layer-oriented Cache/Chunk path.
+1. locating and parsing the metadata incrementally;
+2. retaining the source dimensions, natural position, `data_offset`, and row stride needed for direct addressing;
+3. translating a source-local coordinate/range into physical byte offsets;
+4. reading only the source ranges required to populate the layer-oriented Cache/Chunk path;
+5. validating structural bytes encountered by those reads as appropriate.
 
 A corresponding runtime writer uses the same layout when persisting mutable layer state. It targets runtime storage only; authored files are never modified by write-back.
 
