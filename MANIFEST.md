@@ -1,13 +1,17 @@
-# Documentation Refresh Manifest
+# Documentation Refresh Manifest — Historical Snapshot
 
-This bundle was prepared against Landor head:
+> **Historical file.** This manifest records the documentation-refresh bundle prepared against an older repository state. It is **not** a list of current Landor work and must not be used as implementation guidance.
+>
+> For current state, read `STATUS.md`. For current architecture, read `dev-docs/DESIGN_STATE.md`, `dev-docs/DESIGN_DECISIONS.md`, and `dev-docs/MAPPING_MODEL.md`.
+
+The original documentation bundle was prepared against Landor head:
 
 ```text
 3fb53801631e641c49f07e9525f71055eaf6af71
 Mostly moving old tests to gtest.
 ```
 
-It contains proposed replacements/additions:
+It contained proposed replacements/additions for:
 
 ```text
 README.md
@@ -20,22 +24,18 @@ dev-docs/coding_rules.md
 dev-docs/coding_style.md
 ```
 
-The bundle deliberately does **not** modify:
+The bundle deliberately did not modify:
 
 ```text
 docs/GAMEPLAY.md
 include/managed_heap/*
 ```
 
-`docs/GAMEPLAY.md` should be revisited separately because gameplay/content design is a
-different editorial task from repairing the engineering/architecture documentation.
+The managed heap remains an imported component and should not be modified casually.
 
-`include/managed_heap/` is treated as an imported component.
+## Historical follow-up list
 
-## Mechanical code/config changes implied by these documents
-
-The docs describe settled direction that is not all implemented yet. The main follow-up
-patches are:
+At the time of that snapshot, the bundle identified these mechanical follow-ups:
 
 1. CMake C++20 -> C++23;
 2. enforce no exceptions / no RTTI for Landor code;
@@ -45,8 +45,6 @@ patches are:
 6. move geometry tests into `tests/world/`;
 7. scoped enum values -> PascalCase as affected code is touched;
 8. fix `Map` to use build-selected `landor::storage::Storage`;
-9. reconsider `std::optional` result APIs when their implementation slice is written,
-   preferring direct domain outcomes / `std::expected` where useful.
+9. reconsider `std::optional` result APIs when their implementation slice is written.
 
-These should remain separate, reviewable changes rather than one documentation-driven
-mega-refactor.
+Some of those items have since been completed and others remain open. **Do not use this historical list to determine current status.** See `STATUS.md` instead.
