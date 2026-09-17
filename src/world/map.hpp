@@ -1,6 +1,7 @@
 #pragma once
 
 #include "area.hpp"
+#include "cache.hpp"
 #include "layer.hpp"
 #include "orientation.hpp"
 #include "patch.hpp"
@@ -13,7 +14,6 @@
 #include <cstdint>
 #include <optional>
 #include <span>
-#include <type_traits>
 
 
 namespace landor::geo
@@ -70,25 +70,67 @@ using MapId = std::uint16_t;
  * Consequently, layer capability belongs to the game build while authored
  * layer presence belongs to each Patch.
  *
+ * The Cache preserves this layer-oriented representation. It does not turn
+ * the resident world into an array of Tiles.
+ *
  *
  * Tiles
  * -----
  *
- * A Tile is synthetic.
+ * A Tile is a small value presentation of one Map coordinate.
  *
  * When a caller asks:
  *
- *     auto tile = map.at(position);
+ *     Tile tile = map.at(position);
  *
- * Map resolves each layer independently and assembles a Tile value containing
- * the complete state visible at that coordinate.
+ * Map ensures that the required layer data is resident, then packs the value
+ * of each layer at that coordinate into a Tile. The Tile also carries its
+ * coordinate as identity.
  *
  * The Tile owns those values. It contains no references into layer storage,
- * cached blocks, Patch data or the managed heap.
+ * cached Chunks, Patch data or the managed heap. Copying a Tile is therefore
+ * ordinary value copying and remains valid regardless of later cache
+ * replacement or storage activity.
  *
- * There is therefore no authoritative array of complete Tiles in a Map.
- * A small Tile cache may memoise recently assembled answers, but that cache is
- * disposable and has no semantic meaning.
+ * Symbolic access such as:
+ *
+ *     tile[Fire]
+ *
+ * selects a value already packed into that Tile. It does not perform a Map,
+ * Cache or Storage lookup.
+ *
+ * There is no authoritative array of complete Tiles in a Map. The
+ * authoritative/resident representation remains layer-oriented; Tile is the
+ * cheap per-position presentation given to callers.
+ *
+ *
+ * Cache and Chunks
+ * ----------------
+ *
+ * Cache is private Map machinery. Game and simulation code does not inspect
+ * it directly.
+ *
+ * The Cache has a canonical two-dimensional Chunk size. If a requested Tile
+ * or Region falls inside a non-resident cache area, Map obtains the required
+ * layer Chunks from authored, working, procedural or default sources and
+ * installs those layer values in the Cache.
+ *
+ * A Chunk belongs to one layer. Filling the same spatial cache area for five
+ * layers can therefore involve five layer Chunks.
+ *
+ * Chunk geometry is an I/O/cache concern; it does not constrain the shape of
+ * higher-level algorithmic Regions.
+ *
+ *
+ * Checked access
+ * --------------
+ *
+ * Public Map access is checked. at() and value() must validate that the
+ * coordinate belongs to this Map before performing cache or storage work.
+ *
+ * There is deliberately no unchecked operator[] alternative. A Map access can
+ * involve cache lookup, Chunk selection and storage I/O, so avoiding a couple
+ * of coordinate comparisons would provide no useful optimisation.
  *
  *
  * Storage and alteration
@@ -98,11 +140,11 @@ using MapId = std::uint16_t;
  * Storage abstracts where those bytes physically live.
  *
  * Altered layer state belongs to the working world. Changes may eventually be
- * written back to the storage working copy, but the timing of cache eviction
- * and write-back must never change the answer returned by Map.
+ * written back to the storage working copy, but cache eviction and write-back
+ * must never change the logical answer returned by Map.
  *
  * Procedurally supplied regions may be materialised lazily when first changed.
- * The exact block and write-back machinery lives below this interface.
+ * The exact replacement and write-back policy lives below this interface.
  *
  *
  * Placements
@@ -114,8 +156,8 @@ using MapId = std::uint16_t;
  * Placements. Moving, rotating or reflecting a Placement changes only where
  * that occurrence contributes to the Map.
  *
- * Placement mutation goes through Map so cached spatial answers can be
- * invalidated correctly.
+ * Placement mutation goes through Map so affected cached layer data can be
+ * invalidated/refreshed correctly.
  *
  * Story systems do not belong here. They refer to PlacementIds through
  * world-facing Place objects; Map only deals with geometry and spatial state.
@@ -136,23 +178,31 @@ using MapId = std::uint16_t;
  * Fixed storage
  * -------------
  *
- * MaxPlacements and TileCacheSize are compile-time bounds. Neither requires
- * the managed heap. The managed heap remains available for genuinely dynamic
- * game objects whose lifetime requires it.
+ * MaxPlacements, CacheCapacity and CacheChunkSide are compile-time bounds or
+ * configuration. Neither Placement storage nor Cache requires the managed
+ * heap merely to enforce those bounds. The managed heap remains available for
+ * genuinely dynamic game objects whose lifetime requires it.
  */
 template<
     std::size_t MaxPlacements,
-    std::size_t TileCacheSize,
+    std::size_t CacheCapacity,
+    std::size_t CacheChunkSide,
     typename CoordT = Coord32,
     Layer... Layers>
 class Map
 {
 public:
     using coord_type     = CoordT;
+    using scalar_type    = typename CoordT::scalar_type;
     using area_type      = Area<CoordT>;
     using patch_type     = Patch<CoordT>;
     using placement_type = Placement<CoordT>;
-    using tile_type      = Tile<Layers...>;
+    using tile_type      = Tile<CoordT, Layers...>;
+    using cache_type     = Cache<
+        CacheCapacity,
+        CacheChunkSide,
+        CoordT,
+        Layers...>;
 
 
     /**
@@ -220,12 +270,14 @@ public:
 
 
     /**
-     * Resolve one layer at one coordinate.
+     * Return one layer value at one coordinate.
      *
-     * Resolution may obtain the value from working state, an authored Patch,
-     * procedural generation or a layer default.
+     * This is checked Map access just like at(): position must be validated
+     * before cache/storage work begins.
      *
-     * A missing authored layer is not an error.
+     * Resolution may obtain the value from resident working state, authored
+     * Patch data, procedural generation or a layer default. A missing authored
+     * layer is not an error.
      */
     template<Layer LayerT>
         requires (std::same_as<LayerT, Layers> || ...)
@@ -234,13 +286,24 @@ public:
 
 
     /**
-     * Resolve the complete synthetic Tile at one coordinate.
+     * Return a complete Tile value at one coordinate.
      *
-     * Every layer understood by this Map is resolved before the Tile is
-     * returned. The result owns its values and remains valid regardless of
-     * later cache movement, storage activity or managed-heap compaction.
+     * Access is checked. Map first validates that position belongs to its
+     * logical Area, ensures every required layer is resident in Cache, then
+     * asks Cache to pack those values together with the coordinate into a
+     * Tile.
+     *
+     * The returned Tile owns its values. Later cache replacement, storage
+     * activity or managed-heap compaction cannot invalidate it.
      */
     [[nodiscard]] tile_type at(coord_type position) const;
+
+
+    /** Convenience checked access from scalar coordinates. */
+    [[nodiscard]] tile_type at(scalar_type x, scalar_type y) const
+    {
+        return at(coord_type {x, y});
+    }
 
 
     /**
@@ -309,8 +372,8 @@ public:
     /**
      * Move a Placement.
      *
-     * The authored Patch remains unchanged. Map invalidates spatial answers
-     * affected by both the old and new coverage.
+     * The authored Patch remains unchanged. Map invalidates affected cached
+     * layer data for both the old and new coverage.
      */
     bool set_position(
         PlacementId id,
@@ -345,23 +408,10 @@ public:
 
 private:
     /**
-     * One optional memoised synthetic Tile.
+     * Resolve LayerT from authored Placements, working state and Generator
+     * fallback when Cache needs to fill a missing Chunk.
      *
-     * This cache is strictly derived state. Entries can be discarded at any
-     * time without changing the world.
-     */
-    struct CachedTile
-    {
-        coord_type position;
-        tile_type  tile;
-    };
-
-
-    /**
-     * Resolve LayerT without consulting the synthetic Tile cache.
-     *
-     * This is where authored Placements, working state and Generator fallback
-     * eventually meet.
+     * This source-resolution operation is separate from Tile presentation.
      */
     template<Layer LayerT>
         requires (std::same_as<LayerT, Layers> || ...)
@@ -369,20 +419,41 @@ private:
     resolve(coord_type position) const;
 
 
+    /**
+     * Ensure that every layer required for a complete Tile is resident at
+     * position.
+     *
+     * The implementation promotes the request to CacheChunkSide-aligned
+     * Chunks and fills missing layer Chunks through resolve()/Storage.
+     */
+    void ensure_resident(coord_type position) const;
+
+
+    /** Ensure one layer is resident at position for value<LayerT>(). */
+    template<Layer LayerT>
+        requires (std::same_as<LayerT, Layers> || ...)
+    void ensure_resident(coord_type position) const;
+
+
     /// Find a Placement for internal mutation.
     [[nodiscard]] placement_type*
     mutable_placement(PlacementId id) noexcept;
 
 
-    /// Invalidate a cached answer at one coordinate.
+    /// Invalidate cached layer data covering one coordinate.
     void invalidate(coord_type position) const noexcept;
 
 
-    /// Invalidate cached answers intersecting an area.
+    /// Invalidate cached layer data intersecting an area.
     void invalidate(const area_type& area) const noexcept;
 
 
-    /// Discard every synthetic cached Tile.
+    /**
+     * Invalidate all resident data.
+     *
+     * Cache's dirty-state/write-back contract still applies; invalidation must
+     * never silently discard altered world state.
+     */
     void invalidate_all() const noexcept;
 
 
@@ -411,11 +482,11 @@ private:
     PlacementId m_next_placement_id = 1;
 
     /*
-     * A very small cache of fully synthesized answers is permitted because it
-     * is only an optimisation. Authoritative state remains layer-oriented.
+     * Resident world data remains layer-oriented inside Cache. Cache is mutable
+     * because logically-const Map reads may populate residency as an I/O
+     * optimisation; that does not alter the logical world state.
      */
-    mutable std::array<std::optional<CachedTile>, TileCacheSize> m_tile_cache {};
-    mutable std::size_t m_next_cache_slot = 0;
+    mutable cache_type m_cache {};
 };
 
 
