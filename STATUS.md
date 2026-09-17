@@ -42,7 +42,9 @@ It still declares:
 Standard: c++20
 ```
 
-and should be updated to C++23 for consistency with the build and coding rules.
+That value is deliberate: the installed clang-format 20.1.2 does not accept
+`Standard: c++23`, so the formatter keeps parsing as C++20 while CMake remains
+authoritative for C++23 compilation.
 
 ### Tests
 
@@ -161,7 +163,8 @@ Its current header is aligned to the new Cache model:
 - `Map::at()` is checked world access and returns `Tile<CoordT, Layers...>` by value;
 - `Map::value<LayerT>()` remains layer-specific checked access;
 - missing resident layers are intended to be populated through aligned Chunks;
-- placement mutation invalidates affected cached layer data.
+- placement mutation invalidates affected cached layer data;
+- the Storage dependency is the build-selected `landor::storage::Storage` alias (currently `StorageFilesystem`).
 
 The actual Map resolution/population methods are still pending implementation. In particular, the repository has not yet completed the path from Patch/Placement/source resolution through Storage/Generator into `Cache::fill()`.
 
@@ -223,12 +226,6 @@ as the build-selected concrete alias.
 
 These are known gaps, not invitations to redesign the architecture.
 
-### Map storage seam
-
-`map.hpp` still forward-declares `Storage` in `landor::geo`, while the intended common type is the build-selected `landor::storage::Storage`.
-
-This should be corrected as a small, explicit seam change before substantial Map implementation depends on it.
-
 ### Storage error spelling
 
 `src/storage/types.hpp` still uses snake_case scoped enum values such as:
@@ -270,11 +267,10 @@ The following are not implemented and should not be invented as collateral work:
 
 A sensible next sequence from the current tree is:
 
-1. correct the Map → build-selected Storage type seam;
-2. implement and test the smallest Map → Cache residency/population slice without inventing a storage format;
-3. pin per-layer overlap/precedence behaviour with tests as `Map::resolve()` becomes real;
-4. add replacement/write-back policy only after the fixed-capacity no-eviction path is working;
-5. introduce `Region` only when a simulation needs an algorithmic working-area API;
-6. separately finish mechanical policy alignment in CMake, `.clang-format`, enum spelling, and test layout.
+1. implement and test the smallest Map → Cache residency/population slice without inventing a storage format;
+2. pin per-layer overlap/precedence behaviour with tests as `Map::resolve()` becomes real;
+3. add replacement/write-back policy only after the fixed-capacity no-eviction path is working;
+4. introduce `Region` only when a simulation needs an algorithmic working-area API;
+5. separately finish mechanical policy alignment in CMake, enum spelling, and test layout.
 
 Keep each step small and independently testable.

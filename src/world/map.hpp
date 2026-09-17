@@ -6,6 +6,7 @@
 #include "orientation.hpp"
 #include "patch.hpp"
 #include "placement.hpp"
+#include "platform/storage/storage_filesystem.hpp"
 #include "tile.hpp"
 
 #include <array>
@@ -19,7 +20,6 @@
 namespace landor::geo
 {
 
-class Storage;
 class Generator;
 
 using MapId = std::uint16_t;
@@ -218,7 +218,7 @@ public:
         MapId id,
         area_type area,
         std::span<const patch_type> patches,
-        Storage& storage,
+        storage::Storage& storage,
         Generator& generator) noexcept
         : m_id(id),
           m_area(area),
@@ -470,8 +470,8 @@ private:
      * Storage owns the persistent backing data. Generator supplies the
      * otherwise empty parts of the logical Map.
      */
-    Storage&   m_storage;
-    Generator& m_generator;
+    storage::Storage& m_storage;
+    Generator&        m_generator;
 
     /*
      * Placements are live Map state. std::optional gives us fixed-capacity

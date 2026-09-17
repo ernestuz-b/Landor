@@ -71,6 +71,23 @@ TEST(WorldHeaders, MapAliasesAgreeWithGeometryTypes)
 }
 
 
+TEST(WorldHeaders, MapConstructorUsesSelectedStorageAlias)
+{
+    // Pins the Map -> Storage seam: the constructor must take the
+    // build-selected landor::storage::Storage reference, not an unrelated
+    // geography-local type.
+    static_assert(
+        std::is_constructible_v<
+            TestMap,
+            landor::geo::MapId,
+            TestMap::area_type,
+            std::span<const TestMap::patch_type>,
+            landor::storage::Storage&,
+            landor::geo::Generator&>);
+    SUCCEED();
+}
+
+
 TEST(WorldHeaders, PlaceResolvesGeoIdentifiers)
 {
     using PlaceIds = std::span<const landor::geo::PlacementId>;

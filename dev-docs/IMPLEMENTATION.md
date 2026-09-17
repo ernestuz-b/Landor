@@ -280,9 +280,7 @@ Map borrows:
 - Storage object;
 - Generator/fallback source.
 
-The Storage seam is still not fully aligned: `map.hpp` currently forward-declares `Storage` in `landor::geo`, while the intended build-selected common type is `landor::storage::Storage`.
-
-Correct that explicitly before substantial Map implementation depends on the stale declaration.
+The Storage dependency is the build-selected `landor::storage::Storage` alias exposed by the selected platform header (currently `StorageFilesystem`); `map.hpp` includes that header directly rather than carrying a geography-local `Storage` type.
 
 ### Access
 
@@ -459,10 +457,8 @@ When introduced, build the smallest useful slice rather than pre-building a fram
 
 Current mechanical/source-policy gaps include:
 
-- Map still uses a stale geography-local `Storage` declaration instead of the build-selected `landor::storage::Storage` type;
 - `BUILD_GMOCK` is still forced off in CMake despite project policy allowing GoogleMock;
 - no-exceptions/no-RTTI and the full warning policy are not yet fully enforced by CMake;
-- `.clang-format` still declares C++20 while the project builds as C++23;
 - scoped storage `Error` values are still snake_case rather than PascalCase;
 - older geometry tests still live directly under `tests/`.
 
@@ -474,11 +470,10 @@ The architecture is now sufficiently defined to begin Map integration.
 
 The recommended order is:
 
-1. correct the Map → Storage type seam;
-2. implement checked `value<LayerT>()` / residency for the smallest source path that is actually defined;
-3. implement checked `at()` by ensuring required layers then calling `Cache::tile()`;
-4. pin overlap/precedence semantics with tests as source resolution becomes concrete;
-5. add replacement/write-back policy only after the no-eviction path is proven;
-6. introduce `Region` only when a simulation needs it.
+1. implement checked `value<LayerT>()` / residency for the smallest source path that is actually defined;
+2. implement checked `at()` by ensuring required layers then calling `Cache::tile()`;
+3. pin overlap/precedence semantics with tests as source resolution becomes concrete;
+4. add replacement/write-back policy only after the no-eviction path is proven;
+5. introduce `Region` only when a simulation needs it.
 
 If the source-to-byte mapping required for Chunk loading is not defined, stop and report that missing contract rather than inventing a storage format.
