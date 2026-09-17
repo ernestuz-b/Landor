@@ -2,7 +2,7 @@
 
 ## Overview
 
-The mapping system deliberately presents a very simple interface to game and simulation code:
+The mapping system deliberately presents a simple interface to game and simulation code:
 
 ```cpp
 Tile tile = map.at(23, 14);
@@ -43,38 +43,39 @@ Game / simulations
 
 A `Tile` is the compact value representing one map position.
 
-It contains the properties present in that build of Landor.
+It contains:
 
-For example, a build might currently contain five properties:
+* its map coordinate;
+* the properties enabled in that build.
 
-```text
-Ground
-Height
-Vegetation
-Water
-Fire
-```
-
-A future build may contain eight, ten, or some other compile-time-defined number.
-
-The set of properties is determined at build time. A `Tile` does not reserve runtime space for hypothetical properties that are not part of that build.
-
-If each property occupies one byte, a five-property `Tile` may therefore occupy approximately five bytes; an eight-property build approximately eight bytes, and so on.
-
-`Tile` is intentionally a **cheap value type**.
-
-It should normally be safe and inexpensive to:
+A tile therefore has identity through its position:
 
 ```cpp
-Tile a = map.at(x, y);
+Tile tile = map.at(23, 14);
+
+Coord position = tile.position();
+```
+
+A copied tile keeps that identity:
+
+```cpp
+Tile a = map.at(23, 14);
 Tile b = a;
 ```
 
-Copying a `Tile` copies its values. It does not retain a pointer, reference, or handle into the cache.
+Both values describe the same map position and initially contain the same property values.
 
-This is an important part of the API rather than an accidental implementation detail.
+There is no hidden reference back into `Map` or the cache.
 
-A tile should preferably remain:
+### Tile is a value type
+
+`Tile` is intentionally cheap to copy.
+
+Its property payload may be only a few bytes. If a build contains five byte-sized properties, the property portion occupies approximately five bytes. A future build with eight or ten properties grows accordingly.
+
+The tile also carries its coordinate, but it should still remain a small ordinary value.
+
+It should preferably be:
 
 * compact;
 * trivially copyable where practical;
@@ -82,7 +83,17 @@ A tile should preferably remain:
 * free of heap allocation;
 * free of back-pointers into `Map` or `Cache`.
 
-### Symbolic property access
+Returning `Tile` by value is therefore part of the intended API:
+
+```cpp
+[[nodiscard]] Tile Map::at(Coord position) const;
+```
+
+not an optimisation problem to be avoided.
+
+---
+
+## Tile property access
 
 Properties are accessed symbolically:
 
@@ -91,6 +102,22 @@ tile[Fire]
 tile[Water]
 tile[Height]
 ```
+
+Conceptually:
+
+```cpp
+tile[Fire]
+```
+
+means:
+
+```cpp
+tile.properties()[Fire]
+```
+
+`operator[]` is simply convenient syntax for accessing a property already contained in the tile.
+
+It does **not** cause a map lookup, cache lookup, or storage operation.
 
 For example:
 
@@ -103,25 +130,45 @@ if (tile[Fire] == 0)
 }
 ```
 
-This symbolic syntax should resolve at compile time. It is not a runtime lookup into some external layer object.
+The symbolic selector should resolve at compile time.
+
+A build that does not contain the `Fire` property should not provide meaningful runtime handling for it; such use should be rejected at compile time.
+
+---
+
+## Build-defined properties
+
+The property set is selected at build time.
+
+For example, one build might contain:
+
+```text
+Ground
+Height
+Vegetation
+Water
+Fire
+```
+
+A future build may contain eight, ten, or another number of properties.
+
+There is no need for every executable to reserve storage for all properties Landor may ever support.
 
 Conceptually:
 
 ```cpp
-tile[Fire]
+using Tile = BasicTile<
+    Ground,
+    Height,
+    Vegetation,
+    Water,
+    Fire
+>;
 ```
 
-means:
+The exact implementation may differ, but the principle is:
 
-```text
-select the Fire property already present in this Tile
-```
-
-not:
-
-```text
-go and resolve the Fire layer from storage
-```
+> A Tile contains exactly the world properties supported by that build.
 
 ---
 
@@ -129,7 +176,7 @@ go and resolve the Fire layer from storage
 
 A property describes **state that exists in the world**.
 
-It does not specify whether that state is:
+It does not say whether that state is:
 
 * authored;
 * static;
@@ -137,13 +184,11 @@ It does not specify whether that state is:
 * currently simulated;
 * or intended to become simulated later.
 
-The simulations determine how properties evolve.
+Simulations determine how properties evolve.
 
-For example, `Water` may initially be mostly authored world data. Later it can become an actively simulated property.
+For example, `Water` may initially be mostly authored map state.
 
-The representation does not need to change when that happens.
-
-A future water simulation may read:
+Later, a water simulation may read:
 
 ```text
 Height
@@ -153,7 +198,7 @@ Water
 
 and update `Water` according to flow.
 
-This allows world behaviour such as:
+This allows behaviour such as:
 
 * rivers flowing downhill;
 * wells interacting with local water;
@@ -163,11 +208,11 @@ This allows world behaviour such as:
 * players diverting rivers;
 * terrain modification changing future water flow.
 
-Thus an authored river is best understood as an **initial condition**, not necessarily permanent truth.
+An authored river is therefore an **initial condition**, not necessarily permanent truth.
 
-The same principle applies to the other simulation properties.
+The same principle applies to fire, vegetation, and future simulation properties.
 
-The build's tile properties form the fundamental state upon which simulations operate.
+The properties contained in a Tile are the basic state on which simulations operate.
 
 ---
 
@@ -175,7 +220,7 @@ The build's tile properties form the fundamental state upon which simulations op
 
 `Area` is the geometric concept.
 
-It describes a rectangular extent and belongs to the geometry machinery.
+It describes a rectangular extent.
 
 It has no cache, storage, simulation, or residency semantics.
 
@@ -193,33 +238,33 @@ Conceptually:
 Region region = map.region(...);
 ```
 
-The precise Region API can be decided when its implementation is needed, but its role is clear:
+Its role is:
 
-> A Region is an area of live tile-oriented world state used by an algorithm.
+> A Region is an area of tile-oriented world state used by an algorithm.
 
-Regions are not required to match cache or storage boundaries.
+Regions are allowed to have whatever dimensions are useful to that algorithm.
 
-A simulation may request:
+A fire simulation may request:
 
 ```text
 16 x 8
 ```
 
-even if the cache works internally with:
+while the cache internally works in:
 
 ```text
 32 x 32
 ```
 
-chunks.
+units.
 
-The simulation should not need to know or care.
+The simulation should not know or care.
 
 ---
 
 ## Layers
 
-Persistent or source data is organised by property/layer before it enters the cache.
+Persistent or source data is organised by property/layer before entering the cache.
 
 For example:
 
@@ -231,17 +276,20 @@ Water layer
 Fire layer
 ```
 
-These are useful for storage because each property can be stored, generated, compressed, or fetched independently.
+This is useful for storage because each property may be:
+
+* stored independently;
+* generated independently;
+* compressed differently;
+* fetched independently.
 
 However:
 
-> **Layer organisation stops at the cache boundary.**
+> **Layer organisation ends at cache ingress.**
 
-Above that boundary, the world is tile-oriented.
+The resident representation is tile-oriented.
 
-The cache takes layer-oriented data and materialises ordinary `Tile` values.
-
-So the transition is:
+The transition is:
 
 ```text
 layer-oriented stored data
@@ -253,7 +301,7 @@ layer-oriented stored data
 tile-oriented resident data
 ```
 
-A symbolic property such as `Fire` may be used on both sides as a compile-time descriptor, but that does not mean live game code is performing layer resolution.
+A compile-time property descriptor such as `Fire` may participate on both sides, but this does not mean that `tile[Fire]` performs layer resolution.
 
 ---
 
@@ -261,25 +309,26 @@ A symbolic property such as `Fire` may be used on both sides as a compile-time d
 
 `Chunk` is reserved for the cache and I/O system.
 
-It should not become Landor's generic name for an arbitrary rectangular piece of the world.
+It is not Landor's generic term for a rectangular portion of the world.
 
-The reason for the abstraction is specifically storage and cache organisation.
+A Chunk exists because of storage and cache organisation.
 
-A Chunk represents an aligned square portion of **one stored layer** used for cache/fetch operations.
+A Chunk represents an aligned square portion of **one stored layer** used for I/O.
 
-For example:
+For the same spatial area, these are separate chunks:
 
 ```text
-Fire Chunk
-Water Chunk
+Ground Chunk
 Height Chunk
+Water Chunk
+Fire Chunk
 ```
 
-for the same spatial cache area are three separate chunks.
+If a cache fill needs five properties, it may therefore require five layer-oriented chunk reads.
 
-If a cache fill needs six stored layers, it may therefore require six chunk reads.
+---
 
-### Cache chunk size
+## Cache chunk size
 
 The cache has a configured canonical chunk size.
 
@@ -289,14 +338,12 @@ For example:
 32 x 32
 ```
 
-This is analogous to the line size of a conventional cache, except it is two-dimensional.
+This is similar to a conventional cache-line size, except spatial and two-dimensional.
 
-If an algorithm asks `Map` for data covering an `8 x 8` area, that does **not** imply an `8 x 8` storage fetch.
-
-The cache determines the containing canonical chunk:
+If an algorithm needs only an `8 x 8` Region, the cache may still need the containing `32 x 32` cache area.
 
 ```text
-32 x 32 cache chunk
+32 x 32 cache area
 +--------------------------------+
 |                                |
 |       requested 8 x 8          |
@@ -308,28 +355,30 @@ The cache determines the containing canonical chunk:
 +--------------------------------+
 ```
 
-If the canonical chunk is resident, no I/O is needed.
+If that cache area is resident, no I/O is necessary.
 
-If it is absent, the cache fetches the whole `32 x 32` chunk for the required layer.
+If it is absent, the cache fetches the corresponding canonical Chunk for each required stored layer.
 
-This deliberately trades some over-fetching for:
+This deliberately trades modest over-fetching for:
 
-* fewer fragmented reads;
-* predictable cache organisation;
-* spatial locality;
-* simple residency tests.
+* fewer fragmented storage operations;
+* good spatial locality;
+* predictable cache layout;
+* simple residency decisions.
 
-### Chunk alignment
+---
 
-Chunks should be aligned to the grid corresponding to their size.
+## Chunk alignment
 
-If chunk dimensions are powers of two, this gives especially simple containment.
+Chunks should be aligned to a grid corresponding to their size.
 
-For example, aligned `8 x 8` chunks fit cleanly inside aligned `32 x 32` cache chunks.
+Power-of-two dimensions are especially convenient.
 
-This avoids arbitrary partial-overlap splitting.
+For example, aligned `8 x 8` subareas naturally fit within aligned `32 x 32` cache areas.
 
-For cache purposes, residency can therefore remain binary at canonical chunk granularity:
+This avoids arbitrary partial cache residency.
+
+The cache can reason in simple terms:
 
 ```text
 Fire chunk (4, 7): resident
@@ -340,18 +389,18 @@ Fire chunk (6, 7): resident
 rather than:
 
 ```text
-half of Fire chunk (5, 7) is resident
+47% of Fire chunk (5, 7) is resident
 ```
 
-Smaller chunk sizes may still exist within the I/O machinery when useful, but `Chunk` remains an I/O/cache concept, and the cache itself should have one clearly defined canonical residency/fetch size unless a real need for hierarchical residency appears later.
+Smaller Chunks may exist inside the I/O machinery when useful, but canonical cache residency should remain simple unless a real requirement later justifies hierarchical cache entries.
 
 ---
 
 ## Cache
 
-The cache is an implementation detail beneath `Map`.
+The cache is private implementation machinery beneath `Map`.
 
-Normal game and simulation code should never need to inspect it.
+Normal game and simulation code should not inspect it.
 
 The caller writes:
 
@@ -365,7 +414,12 @@ not:
 Tile tile = cache.at(23, 14);
 ```
 
-`Map::at()` hides whether the requested tile was already resident or required storage I/O.
+`Map::at()` hides whether the requested tile:
+
+* was already resident;
+* required one or more Chunk reads;
+* caused cache replacement;
+* was freshly materialised from stored layer data.
 
 Conceptually:
 
@@ -373,9 +427,12 @@ Conceptually:
 Map::at(x, y)
       |
       v
+check map coordinates
+      |
+      v
 find containing cache area
       |
-      +---- resident ----> return Tile value
+      +---- resident ----> copy Tile
       |
       `---- missing
               |
@@ -390,30 +447,17 @@ find containing cache area
         populate cached Tiles
               |
               v
-        return Tile value
+           copy Tile
+              |
+              v
+            caller
 ```
-
-If five properties must be loaded, one cache miss for the corresponding spatial area may conceptually involve:
-
-```text
-Ground      Chunk
-Height      Chunk
-Vegetation  Chunk
-Water       Chunk
-Fire        Chunk
-```
-
-Each chunk is layer-oriented on the storage side.
-
-Once loaded, those values populate the corresponding fields/properties of the resident tile array.
-
-From that point upward, the layer distinction no longer matters operationally.
 
 ---
 
 ## Cache representation
 
-The resident cache should be tile-oriented.
+The resident cache is tile-oriented.
 
 Conceptually:
 
@@ -427,11 +471,94 @@ Conceptually:
 +----------+----------+----------+
 ```
 
-This reflects the way simulations consume the data: they commonly need several properties belonging to the same spatial position.
+This matches how simulations normally consume data: several properties belonging to the same position are used together.
 
-A tile in the cache is therefore very close to the `Tile` value returned by `Map::at()`.
+The tile stored in the cache should therefore be very close, or identical in value representation, to the `Tile` returned by `Map::at()`.
 
-This is intentional.
+---
+
+## Checked Map access
+
+All public Map access should be checked.
+
+For example:
+
+```cpp
+Tile tile = map.at(23, 14);
+```
+
+validates that `(23, 14)` belongs to the Map before performing the underlying operation.
+
+There is little value in exposing a separate unchecked public access path.
+
+Unlike an ordinary in-memory array lookup, a Map access may involve:
+
+* coordinate translation;
+* cache lookup;
+* cache miss handling;
+* Chunk selection;
+* several layer reads;
+* storage I/O;
+* cache replacement;
+* tile materialisation.
+
+The cost of a bounds check is negligible beside those operations.
+
+Even on small embedded targets, Landor does not require extreme frame rates. A target delivering approximately `8 FPS` can already be entirely acceptable.
+
+The design should therefore favour:
+
+* correctness;
+* explicit contracts;
+* predictable behaviour;
+* easy debugging;
+
+over saving a handful of comparisons in Map access.
+
+This does **not** mean deliberately inefficient code. It means not creating unsafe APIs to optimise operations whose cost is insignificant compared with the work beneath them.
+
+---
+
+## `at()` versus `operator[]`
+
+Landor should follow the useful semantic expectation associated with `at()`:
+
+```cpp
+map.at(position)
+```
+
+means checked access.
+
+There is currently no compelling reason to provide:
+
+```cpp
+map[position]
+```
+
+as an unchecked alternative.
+
+Inside a `Tile`, however:
+
+```cpp
+tile[Fire]
+```
+
+has different semantics.
+
+It is merely convenient symbolic access to a property already contained in the value:
+
+```cpp
+tile.properties()[Fire]
+```
+
+No Map or cache operation occurs.
+
+So the two forms do not conflict:
+
+```cpp
+Tile tile = map.at(position); // checked world access
+auto fire = tile[Fire];       // cheap property access
+```
 
 ---
 
@@ -469,67 +596,88 @@ other target-specific implementations
 
 In particular:
 
-* simulations should not know about chunks;
+* simulations should not know about Chunks;
 * simulations should not know cache-line dimensions;
 * simulations should not access the cache directly;
 * `Tile` should not expose cache residency;
 * `Region` dimensions should not be constrained by storage layout;
-* `Storage` should not need to understand game simulation semantics.
+* `Storage` should not need to understand simulation semantics.
 
 ---
 
 ## Core design principles
 
-### Tile is a value
+### Tile is a small identified value
 
-`Tile` is deliberately small and cheap enough to return and copy by value.
+A `Tile` contains:
+
+* its coordinate;
+* its build-defined properties.
+
+It is deliberately cheap to return and copy by value.
 
 ```cpp
 Tile tile = map.at(x, y);
 ```
 
-is the normal interface.
+is the ordinary interface.
+
+### Tile property access is symbolic
+
+```cpp
+tile[Fire]
+```
+
+means property access within the Tile itself.
+
+It does not query Map, Cache, or Storage.
+
+### Map access is checked
+
+All ordinary world access validates coordinates.
+
+The cost is insignificant compared with the possible cache and storage work underneath.
 
 ### Region is algorithmic
 
-A `Region` describes the live-world extent on which an algorithm wants to operate.
+A `Region` describes the world extent on which an algorithm wants to operate.
 
-Its shape is chosen by that algorithm.
+Its dimensions are chosen for the algorithm, not for storage.
 
 ### Chunk is I/O-specific
 
-A `Chunk` exists because of storage/cache organisation.
+A `Chunk` exists because of cache/storage organisation.
 
 It should not be reused as the generic rectangular work unit of simulations.
 
 ### Cache is hidden
 
-The cache exists to make residency and I/O efficient.
+The cache exists solely to make residency and I/O efficient.
 
-It must not leak into the normal world-facing API.
+It must not leak into normal game code.
 
 ### Layers end at cache ingress
 
-Layer-oriented organisation is valuable for storage.
+Layer-oriented organisation belongs to stored/source data.
 
-Resident game state is tile-oriented.
+Resident state is tile-oriented.
 
 ### Properties precede simulations
 
-A property may exist before an active simulation for it exists.
+A property may exist long before a full simulation for it exists.
 
-Adding or extending simulations should not require redesigning `Tile`, `Map`, or the storage boundary.
+The later addition of water flow, fire propagation, vegetation growth, or other systems should not require redesigning the basic Tile/Map/storage boundary.
 
 ### Build determines the property set
 
-The number and identity of tile properties are compile-time/build-time choices.
+The number and identity of Tile properties are compile-time/build-time decisions.
 
-There is no need for runtime support for layers that cannot exist in that build.
+No runtime accommodation is required for properties that cannot exist in that executable.
 
 ### Authored state is an initial condition
 
-Properties loaded from storage describe the starting/current world state.
+Stored properties describe the starting/current state of the world.
 
-Simulation may subsequently evolve them.
+Simulations may subsequently evolve them.
 
 A river, fire, vegetation distribution, or other authored feature need not remain unchanged merely because it originated in stored map data.
