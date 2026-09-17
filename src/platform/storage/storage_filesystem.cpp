@@ -48,6 +48,75 @@ namespace
 } // namespace
 
 
+Result StorageFilesystem::write(SourceId source, Offset offset,
+                                std::span<const std::byte> data) noexcept
+{
+    const auto* relative = relative_path(source);
+    if (relative == nullptr)
+    {
+        return Result{Error::invalid_source};
+    }
+
+    std::filesystem::path physical_path;
+    Size logical_size{};
+
+    const Result resolved = source_file_size(m_root, *relative, physical_path, logical_size);
+    if (!resolved)
+    {
+        return resolved;
+    }
+
+    // The same subtraction-style checking as read(): the whole range must
+    // fit inside the existing logical source. write() replaces bytes; it
+    // never grows, truncates or creates a source.
+    if (offset > logical_size || data.size() > static_cast<std::size_t>(logical_size - offset))
+    {
+        return Result{Error::out_of_range};
+    }
+
+    // An empty write is a successful no-op once the range has been accepted.
+    if (data.empty())
+    {
+        return Result{Error::none};
+    }
+
+    // Opened without truncation so an existing source keeps its exact size,
+    // and with in|out so a file that is missing at this point is reported
+    // instead of created.
+    //
+    // Standard std::fstream does not provide reliable access to the
+    // underlying failure reason. Every failure of open, seek, write, flush
+    // or close below is therefore reported as write_failed, and this backend
+    // cannot currently report read_only or no_space. A more specific error
+    // requires direct, reliable evidence of the cause; it must never be
+    // inferred from other observations.
+    std::fstream stream(physical_path, std::ios::in | std::ios::out | std::ios::binary);
+    if (!stream)
+    {
+        return Result{Error::write_failed};
+    }
+
+    stream.seekp(static_cast<std::streamoff>(offset), std::ios::beg);
+    if (!stream)
+    {
+        return Result{Error::write_failed};
+    }
+
+    stream.write(reinterpret_cast<const char*>(data.data()),
+                 static_cast<std::streamsize>(data.size()));
+
+    // close() flushes the stream, which is what makes the bytes visible to a
+    // subsequent read() through a fresh stream. A failure during flush means
+    // the write did not complete.
+    stream.close();
+    if (stream.fail())
+    {
+        return Result{Error::write_failed};
+    }
+
+    return Result{Error::none};
+}
+
 Result StorageFilesystem::size(
     SourceId source,
     Size& result) const noexcept

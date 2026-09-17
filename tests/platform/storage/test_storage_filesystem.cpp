@@ -50,6 +50,55 @@ std::vector<std::byte> sub_range(
 }
 
 
+// A second deterministic byte pattern with a different phase from
+// make_pattern() (138 != 11 modulo 251), so replacement data always differs
+// from the contents it replaces at every offset.
+std::vector<std::byte> make_replacement(const std::size_t count)
+{
+    std::vector<std::byte> replacement(count);
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        replacement[i] = static_cast<std::byte>((i * 37 + 138) % 251);
+    }
+
+    return replacement;
+}
+
+// The full file contents after replacing [offset, offset + data.size()).
+std::vector<std::byte> file_after_replacement(const std::vector<std::byte>& contents,
+                                              const std::size_t offset,
+                                              const std::span<const std::byte>& data)
+{
+    std::vector<std::byte> result = contents;
+    for (std::size_t i = 0; i < data.size(); ++i)
+    {
+        result[offset + i] = data[i];
+    }
+
+    return result;
+}
+
+// Reads one complete source back through the storage interface.
+std::vector<std::byte> read_full_source(const Storage& storage, const SourceId source)
+{
+    Size size{};
+    const Result size_result = storage.size(source, size);
+    if (!size_result)
+    {
+        return {};
+    }
+
+    std::vector<std::byte> contents(size);
+    const Result read_result = storage.read(source, Offset{0}, std::span<std::byte>{contents});
+    if (!read_result)
+    {
+        return {};
+    }
+
+    return contents;
+}
+
+
 class StorageFilesystemTest : public ::testing::Test
 {
 protected:
@@ -373,6 +422,241 @@ TEST_F(StorageFilesystemTest, ReportsOutOfRangeOnReadForAFileLargerThanStorageSi
 
     EXPECT_FALSE(result);
     EXPECT_EQ(result.error, Error::out_of_range);
+}
+
+
+TEST_F(StorageFilesystemTest, ReplacesTheCompleteContentsOfAFile)
+{
+    const std::vector<std::byte> pattern = make_pattern(16);
+    write_bytes("present.layer", std::span<const std::byte>{pattern});
+
+    const std::vector<std::byte> replacement = make_replacement(16);
+    Storage storage = make_storage();
+
+    const Result result =
+        storage.write(SourceId{0}, Offset{0}, std::span<const std::byte>{replacement});
+
+    EXPECT_TRUE(result);
+    EXPECT_EQ(result.error, Error::none);
+
+    // The replacement is observable through StorageFilesystem::read().
+    std::vector<std::byte> destination(replacement.size());
+    const Result read_result =
+        storage.read(SourceId{0}, Offset{0}, std::span<std::byte>{destination});
+    EXPECT_TRUE(read_result);
+    EXPECT_EQ(read_result.error, Error::none);
+    EXPECT_EQ(destination, replacement);
+
+    // The source retains its previous size.
+    Size size{};
+    const Result size_result = storage.size(SourceId{0}, size);
+    EXPECT_TRUE(size_result);
+    EXPECT_EQ(size, Size{16});
+}
+
+TEST_F(StorageFilesystemTest, ReplacesBytesInTheMiddleLeavingTheSurroundingBytesUnchanged)
+{
+    const std::vector<std::byte> pattern = make_pattern(64);
+    write_bytes("present.layer", std::span<const std::byte>{pattern});
+
+    constexpr std::size_t offset = 20;
+    constexpr std::size_t count = 12;
+
+    const std::vector<std::byte> replacement = make_replacement(count);
+    Storage storage = make_storage();
+
+    const Result result = storage.write(SourceId{0}, static_cast<Offset>(offset),
+                                        std::span<const std::byte>{replacement});
+
+    EXPECT_TRUE(result);
+    EXPECT_EQ(result.error, Error::none);
+
+    // A read of the whole file sees the replacement exactly in the written
+    // range and the original bytes everywhere else.
+    EXPECT_EQ(read_full_source(storage, SourceId{0}),
+              file_after_replacement(pattern, offset, replacement));
+
+    // The source retains its previous size.
+    Size size{};
+    const Result size_result = storage.size(SourceId{0}, size);
+    EXPECT_TRUE(size_result);
+    EXPECT_EQ(size, Size{64});
+}
+
+TEST_F(StorageFilesystemTest, ReplacesTheFirstBytesOfAFile)
+{
+    const std::vector<std::byte> pattern = make_pattern(32);
+    write_bytes("present.layer", std::span<const std::byte>{pattern});
+
+    const std::vector<std::byte> replacement = make_replacement(5);
+    Storage storage = make_storage();
+
+    const Result result =
+        storage.write(SourceId{0}, Offset{0}, std::span<const std::byte>{replacement});
+
+    EXPECT_TRUE(result);
+    EXPECT_EQ(result.error, Error::none);
+
+    EXPECT_EQ(read_full_source(storage, SourceId{0}),
+              file_after_replacement(pattern, 0, replacement));
+
+    Size size{};
+    const Result size_result = storage.size(SourceId{0}, size);
+    EXPECT_TRUE(size_result);
+    EXPECT_EQ(size, Size{32});
+}
+
+TEST_F(StorageFilesystemTest, ReplacesTheFinalBytesEndingExactlyAtEof)
+{
+    const std::vector<std::byte> pattern = make_pattern(64);
+    write_bytes("present.layer", std::span<const std::byte>{pattern});
+
+    const std::vector<std::byte> replacement = make_replacement(4);
+    Storage storage = make_storage();
+
+    // Final four bytes only, ending exactly at EOF.
+    const Result result =
+        storage.write(SourceId{0}, Offset{60}, std::span<const std::byte>{replacement});
+
+    EXPECT_TRUE(result);
+    EXPECT_EQ(result.error, Error::none);
+
+    EXPECT_EQ(read_full_source(storage, SourceId{0}),
+              file_after_replacement(pattern, 60, replacement));
+
+    Size size{};
+    const Result size_result = storage.size(SourceId{0}, size);
+    EXPECT_TRUE(size_result);
+    EXPECT_EQ(size, Size{64});
+}
+
+TEST_F(StorageFilesystemTest, RejectsAWriteExtendingOneByteBeyondEof)
+{
+    const std::vector<std::byte> pattern = make_pattern(64);
+    write_bytes("present.layer", std::span<const std::byte>{pattern});
+
+    Storage storage = make_storage();
+
+    // Offset 63 plus two bytes ends one byte past the end of the source.
+    const std::vector<std::byte> data = make_replacement(2);
+    const Result result = storage.write(SourceId{0}, Offset{63}, std::span<const std::byte>{data});
+
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error, Error::out_of_range);
+
+    // The rejected write leaves the source unchanged.
+    EXPECT_EQ(read_full_source(storage, SourceId{0}), pattern);
+}
+
+TEST_F(StorageFilesystemTest, RejectsAWriteAtAnOffsetBeyondEof)
+{
+    const std::vector<std::byte> pattern = make_pattern(64);
+    write_bytes("present.layer", std::span<const std::byte>{pattern});
+
+    Storage storage = make_storage();
+
+    const std::vector<std::byte> data = make_replacement(8);
+    const Result result = storage.write(SourceId{0}, Offset{65}, std::span<const std::byte>{data});
+
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error, Error::out_of_range);
+
+    EXPECT_EQ(read_full_source(storage, SourceId{0}), pattern);
+}
+
+TEST_F(StorageFilesystemTest, RejectsANonEmptyWriteToAnEmptySource)
+{
+    write_file("empty.layer", 0);
+
+    Storage storage = make_storage();
+
+    const std::vector<std::byte> data = make_replacement(1);
+    const Result result = storage.write(SourceId{2}, Offset{0}, std::span<const std::byte>{data});
+
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error, Error::out_of_range);
+
+    // The empty source stays empty and is not grown by the rejected write.
+    Size size{};
+    const Result size_result = storage.size(SourceId{2}, size);
+    EXPECT_TRUE(size_result);
+    EXPECT_EQ(size, Size{0});
+}
+
+TEST_F(StorageFilesystemTest, AcceptsAnEmptyWriteAtOrBeforeEof)
+{
+    write_file("present.layer", 64);
+    write_file("empty.layer", 0);
+
+    Storage storage = make_storage();
+
+    const std::span<const std::byte> empty{};
+
+    // Before EOF.
+    const Result before_eof = storage.write(SourceId{0}, Offset{10}, empty);
+    EXPECT_TRUE(before_eof);
+    EXPECT_EQ(before_eof.error, Error::none);
+
+    // Exactly at EOF.
+    const Result at_eof = storage.write(SourceId{0}, Offset{64}, empty);
+    EXPECT_TRUE(at_eof);
+    EXPECT_EQ(at_eof.error, Error::none);
+
+    // Empty source, offset at its EOF.
+    const Result empty_source = storage.write(SourceId{2}, Offset{0}, empty);
+    EXPECT_TRUE(empty_source);
+    EXPECT_EQ(empty_source.error, Error::none);
+
+    // The no-op writes leave the source unchanged.
+    const std::vector<std::byte> original(64, std::byte{'a'});
+    EXPECT_EQ(read_full_source(storage, SourceId{0}), original);
+    Size size{};
+    const Result size_result = storage.size(SourceId{0}, size);
+    EXPECT_TRUE(size_result);
+    EXPECT_EQ(size, Size{64});
+}
+
+TEST_F(StorageFilesystemTest, RejectsAnEmptyWriteBeyondEof)
+{
+    const std::vector<std::byte> pattern = make_pattern(64);
+    write_bytes("present.layer", std::span<const std::byte>{pattern});
+
+    Storage storage = make_storage();
+
+    const std::span<const std::byte> empty{};
+    const Result result = storage.write(SourceId{0}, Offset{65}, empty);
+
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error, Error::out_of_range);
+
+    EXPECT_EQ(read_full_source(storage, SourceId{0}), pattern);
+}
+
+TEST_F(StorageFilesystemTest, RejectsAWriteForASourceIdOutsideTheSourceTable)
+{
+    Storage storage = make_storage();
+
+    const std::vector<std::byte> data = make_replacement(8);
+    for (const SourceId source : {SourceId{4}, SourceId{0xFFFF}})
+    {
+        const Result result = storage.write(source, Offset{0}, std::span<const std::byte>{data});
+        EXPECT_FALSE(result);
+        EXPECT_EQ(result.error, Error::invalid_source);
+    }
+}
+
+TEST_F(StorageFilesystemTest, DoesNotCreateAMissingConfiguredFileOnWrite)
+{
+    Storage storage = make_storage();
+
+    const std::vector<std::byte> data = make_replacement(8);
+    const Result result = storage.write(SourceId{1}, Offset{0}, std::span<const std::byte>{data});
+
+    // The shared path/size resolution reports a missing file as read_failed;
+    // write() keeps that mapping and must not create the file.
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error, Error::read_failed);
+    EXPECT_FALSE(std::filesystem::exists(m_root_path / "missing.layer"));
 }
 
 } // namespace
