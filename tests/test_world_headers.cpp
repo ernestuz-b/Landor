@@ -12,6 +12,7 @@
 #include "storage/types.hpp"
 
 #include "world/area.hpp"
+#include "world/authored_layer_source.hpp"
 #include "world/cache.hpp"
 #include "world/chunk.hpp"
 #include "world/coord.hpp"

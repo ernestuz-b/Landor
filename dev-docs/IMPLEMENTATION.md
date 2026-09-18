@@ -225,6 +225,21 @@ The format is intentionally extensible through future metadata records, includin
 
 A minimal streaming parser/source-reader now implements this contract in `src/world/layer_source.hpp`: it parses the bounded metadata region incrementally (no whole-file read or copy), exposes the parsed layout with direct cell addressing, and reads one bounded row fragment per cell-range request through the Storage contract.
 
+The generic reader deliberately stays unaware of Patch semantics. The dense v1 Patch/source geometry contract is enforced by a separate bridge header, `src/world/authored_layer_source.hpp`:
+
+```cpp
+template<typename CoordT>
+[[nodiscard]] constexpr
+std::expected<void, AuthoredLayerSourceError>
+validate_authored_layer_source(
+    const Patch<CoordT>& patch,
+    const LayerSourceLayout& source) noexcept;
+```
+
+It takes an already-parsed `LayerSourceLayout` (no Storage I/O) and checks that the Patch local area is non-empty and anchored at `(0, 0)`, that the source `D` dimensions equal the Patch local extent exactly, and that the source `P` position equals `Patch::natural_position()`. An empty or non-zero-origin local area is rejected at this seam rather than translated or normalized, and `Patch` itself remains unconstrained authored metadata; the check is not enforced in the `Patch` constructor.
+
+Both comparisons run in 64-bit signed intermediates. The extent is computed from the min/max corners instead of `Area::width()`/`height()`, because those accessors wrap for narrow scalar types when the true extent exceeds the scalar maximum (a 128-cell `Coord8` area reports `width() == -128` — a separate Area accessor limitation the validator avoids). The source `P` (`Coord32`) is never narrowed into the Patch's coordinate type before comparing, so an out-of-range `P` (for example 128 against a `Patch<Coord8>`) reports `PositionMismatch` instead of wrapping to -128. The helper validates geometry only: LayerId, SourceId, backend and source sharing are outside its contract.
+
 ## 8. Placement
 
 `Placement<CoordT>` is a small live value:
@@ -498,7 +513,7 @@ Treat these as separate reviewable changes.
 
 ## 20. Next implementation slice
 
-The authored source file layout and Placement transform anchor are pinned, the source format now has a streaming parser/addressing helper (`src/world/layer_source.hpp`) with behavioural tests (`tests/world/test_layer_source.cpp`), and the Placement/world ↔ Patch/source-local transform itself is implemented and tested (`tests/world/test_placement.cpp`). The procedural/default fallback contract still needs to be defined.
+The authored source file layout and Placement transform anchor are pinned, the source format now has a streaming parser/addressing helper (`src/world/layer_source.hpp`) with behavioural tests (`tests/world/test_layer_source.cpp`), the Placement/world ↔ Patch/source-local transform itself is implemented and tested (`tests/world/test_placement.cpp`), and the dense v1 Patch/source geometry contract is validated by `src/world/authored_layer_source.hpp` with behavioural tests (`tests/world/test_authored_layer_source.cpp`). Map itself does not yet perform source opening, validation, or resolution. The procedural/default fallback contract still needs to be defined.
 
 The recommended order is:
 

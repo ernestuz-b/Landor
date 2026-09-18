@@ -5,8 +5,8 @@ This file describes **what exists now**, not the final architecture.
 Source baseline reviewed before this update:
 
 ```text
-64d7d1390cc0e4a61e6a794e64e5a09eccfe828c
-docs: pin placement transform origin
+0d24c9441815acc69d7121a7a6295602fa643986
+world: implement placement coordinate transforms
 ```
 
 For intended architecture, read `dev-docs/DESIGN_STATE.md`,
@@ -65,12 +65,13 @@ tests/world/test_tile.cpp
 tests/world/test_chunk.cpp
 tests/world/test_cache.cpp
 tests/world/test_layer_source.cpp
+tests/world/test_authored_layer_source.cpp
 tests/world/test_placement.cpp
 
 tests/platform/storage/test_storage_filesystem.cpp
 ```
 
-`Tile`, `Chunk`, `Cache`, the streaming layer source reader, the Placement coordinate transform, and filesystem storage now have behavioural GoogleTests.
+`Tile`, `Chunk`, `Cache`, the streaming layer source reader, the authored Patch/source geometry contract, the Placement coordinate transform, and filesystem storage now have behavioural GoogleTests.
 
 The final test-layout rule is still to mirror `src/` under `tests/`. The newer mapping and platform-storage tests already do that; `test_area.cpp`, `test_coord.cpp`, and the all-headers tripwire still live at the test root and can be moved separately.
 
@@ -96,6 +97,7 @@ src/world/
     chunk.hpp
     cache.hpp
     layer_source.hpp
+    authored_layer_source.hpp
     patch.hpp
     placement.hpp
     patchset.hpp
@@ -176,7 +178,7 @@ Its current header is aligned to the new Cache model:
 - the Storage dependency is the build-selected `landor::storage::Storage` alias (currently `StorageFilesystem`);
 - Map no longer carries a placeholder `Generator&`; procedural/default fallback remains an intentionally undefined resolution seam until concrete requirements pin its contract.
 
-The actual Map resolution/population methods are still pending implementation. The authored dense layer source layout is now defined and has a streaming parser/reader (`src/world/layer_source.hpp`); the full Patch/Placement resolution path into `Cache::fill()` is still pending.
+The actual Map resolution/population methods are still pending implementation. The authored dense layer source layout is now defined and has a streaming parser/reader (`src/world/layer_source.hpp`) plus a pure geometry validator for the Patch/source contract (`src/world/authored_layer_source.hpp`); Map does not yet perform source opening, validation, or resolution, and the full Patch/Placement resolution path into `Cache::fill()` is still pending.
 
 ## Authored-world contracts
 
@@ -185,6 +187,8 @@ The actual Map resolution/population methods are still pending implementation. T
 An immutable reusable authored region containing identity, authored geometry, and zero or more `LayerBinding { LayerId, storage::SourceId }` entries.
 
 Patch-local `(0, 0)` is the authored transform/source origin. Dense v1 authored source coordinates begin at that same origin; `D` gives the local rectangle size and `P` agrees with `Patch::natural_position()`, the world coordinate of that origin at natural placement.
+
+That agreement is now enforced, not only documented: `validate_authored_layer_source()` in `src/world/authored_layer_source.hpp` checks an already-parsed `LayerSourceLayout` against the Patch and rejects an empty or non-zero-origin local area (`InvalidPatchGeometry`), a `D`/local-extent disagreement (`DimensionMismatch`), and a `P`/`natural_position()` disagreement (`PositionMismatch`). Extent and position are compared in 64-bit intermediates, so narrow `Coord8`/`Coord16` Patches compare correctly against the `Coord32` source position without narrowing or wrap. The check deliberately lives at this compatibility seam, not in the `Patch` constructor: `Patch` remains unconstrained authored metadata.
 
 Missing authored data for a layer is represented by absence of a binding, not by unsupported capability.
 
@@ -207,6 +211,8 @@ Version 1.0 uses:
 Metadata remains extensible; future layer-specific records are explicitly possible but not defined yet. Sparse coordinate-record data is also deferred rather than included in version 1.0.
 
 A minimal streaming reader now implements this contract in `src/world/layer_source.hpp`: bounded incremental metadata parsing, direct cell addressing, and bounded single-row cell reads through the Storage contract. Opening never loads or copies the complete source, and whole-file structural scanning is not performed. Cache/Map integration and runtime write-back are still pending.
+
+The generic reader stays Patch-unaware. The dense v1 Patch/source geometry contract is validated by the separate bridge header `src/world/authored_layer_source.hpp`, which takes an already-parsed layout, performs no Storage I/O, and carries no source-identity semantics (no LayerId/SourceId/backend/share concerns).
 
 ### `landor::geo::Placement`
 
