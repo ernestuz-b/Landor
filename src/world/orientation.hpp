@@ -9,7 +9,10 @@ namespace landor::geo
 /**
  * Rotation applied to an authored patch when it is placed in a Map.
  *
- * Rotations are clockwise and operate in patch-local coordinates.
+ * Rotations are clockwise in patch-local coordinates and are performed
+ * about the patch-local origin `(0, 0)`. The transformed bounds are not
+ * renormalised around a new top-left; oriented coordinates may therefore be
+ * negative relative to that origin.
  */
 enum class Rotation : std::uint8_t
 {
@@ -23,7 +26,8 @@ enum class Rotation : std::uint8_t
 /**
  * Reflection applied to an authored patch when it is placed in a Map.
  *
- * Reflection is applied before rotation.
+ * Reflection is applied before rotation. The reflection axes pass through
+ * the patch-local origin `(0, 0)`.
  *
  * `x` reflects across the local X axis.
  * `y` reflects across the local Y axis.
@@ -43,7 +47,11 @@ enum class Reflection : std::uint8_t
  *
  * Translation is deliberately not part of Orientation. Position belongs to
  * the placement itself; this type only describes how the authored coordinates
- * are turned around their local origin.
+ * are turned around the patch-local origin `(0, 0)`.
+ *
+ * Orientation does not renormalise the resulting rectangle. A rotated or
+ * reflected Patch may therefore extend to negative coordinates relative to
+ * the Placement position.
  *
  * The transformation order is always:
  *

@@ -120,11 +120,20 @@ D:32 32
 
 For version 1.0, the dense data section contains exactly `height` rows and exactly `width` cell bytes per row.
 
+For an authored Patch source, source-local coordinates are Patch-local coordinates. The represented v1 authored rectangle is anchored at Patch-local `(0, 0)` and spans:
+
+```text
+0 <= x < width
+0 <= y < height
+```
+
+Consequently, the Patch's authored local extent and the source `D` dimensions describe the same rectangle; v1 does not carry a separate local-origin offset.
+
 ### `P` — natural position
 
 `P` gives the natural position associated with the represented layer extent.
 
-For an authored Patch source, this is the authored Patch natural position.
+For an authored Patch source, this is the Map/world coordinate where Patch-local/source-local `(0, 0)` belongs when the Patch is at its natural placement. It therefore agrees with `Patch::natural_position()`.
 
 Example:
 

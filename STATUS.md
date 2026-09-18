@@ -5,8 +5,8 @@ This file describes **what exists now**, not the final architecture.
 Source baseline reviewed before this update:
 
 ```text
-4b81928db0b05ab50a5b0584c8b042f22ab4e63b
-docs: define cache-backed layer runtime
+50701ac9b434f823266f6163232895e96f3a4857
+world: harden streaming layer source reader
 ```
 
 For intended architecture, read `dev-docs/DESIGN_STATE.md`,
@@ -183,6 +183,8 @@ The actual Map resolution/population methods are still pending implementation. T
 
 An immutable reusable authored region containing identity, authored geometry, and zero or more `LayerBinding { LayerId, storage::SourceId }` entries.
 
+Patch-local `(0, 0)` is the authored transform/source origin. Dense v1 authored source coordinates begin at that same origin; `D` gives the local rectangle size and `P` agrees with `Patch::natural_position()`, the world coordinate of that origin at natural placement.
+
 Missing authored data for a layer is represented by absence of a binding, not by unsupported capability.
 
 ### Authored layer source files
@@ -208,6 +210,8 @@ A minimal streaming reader now implements this contract in `src/world/layer_sour
 ### `landor::geo::Placement`
 
 One live occurrence of a Patch with its own identity, position, and Orientation.
+
+`Placement::position()` is the Map coordinate of Patch-local `(0, 0)`. Reflection and rotation happen about that origin, followed by translation; transformed bounds are not renormalised around a new top-left.
 
 Transform order remains:
 
@@ -283,7 +287,7 @@ The newer tests mirror the source tree, while the older geometry tests still liv
 
 The following are not implemented and should not be invented as collateral work:
 
-- world/Placement coordinates to Patch-local source-coordinate transformation;
+- implementation of the now-pinned world/Placement ↔ Patch/source-local coordinate transformation;
 - final Map layer precedence once `Map::resolve()` is implemented;
 - procedural/default fallback contract used by Map resolution;
 - cache replacement policy;
@@ -297,7 +301,7 @@ The following are not implemented and should not be invented as collateral work:
 
 A sensible next sequence from the current tree is:
 
-1. pin the procedural/default fallback contract and the Placement-to-Patch-local transform required for Map resolution;
+1. implement and test the pinned Placement/world ↔ Patch/source-local transform, and separately pin the procedural/default fallback contract required for Map resolution;
 2. implement and test the smallest checked `Map::value<LayerT>()` → Cache residency/population slice using those explicit contracts and the streaming layer source reader;
 3. implement checked `Map::at()` by ensuring required layers and then packing through Cache;
 4. pin per-layer overlap/precedence behaviour with tests as `Map::resolve()` becomes real;

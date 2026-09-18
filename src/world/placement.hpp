@@ -55,9 +55,19 @@ using PlacementId = std::uint16_t;
  * owning Map is responsible for invalidating any cached spatial results
  * affected by such a change.
  *
- * Patch-local coordinates are transformed in this order:
+ * Patch-local `(0, 0)` is the transform anchor. `position()` is the Map
+ * coordinate at which that local origin is placed. Patch-local coordinates
+ * are transformed in this order:
  *
  *     reflection -> rotation -> translation
+ *
+ * Conceptually:
+ *
+ *     world = position + rotate(reflect(local))
+ *
+ * There is no post-transform renormalisation to keep the oriented Patch on the
+ * positive side of `position`; rotated/reflected local coordinates may be
+ * negative relative to the anchor.
  *
  * Placement owns only its transform and identities. It does not own the Patch
  * and contains no pointers or references into map storage.
@@ -96,7 +106,7 @@ public:
     }
 
 
-    /// Current position of this occurrence in Map coordinates.
+    /// Map coordinate of this occurrence's Patch-local origin `(0, 0)`.
     [[nodiscard]] constexpr coord_type position() const noexcept
     {
         return m_position;

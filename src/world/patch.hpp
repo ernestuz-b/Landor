@@ -34,6 +34,11 @@ struct LayerBinding
  * A Patch describes reusable authored content. It has an identity, a name,
  * a natural position in the world and a rectangular local area.
  *
+ * Patch-local `(0, 0)` is the authored transform/source origin. For the
+ * current dense v1 authored format, the local rectangle starts at `(0, 0)`;
+ * its source `D` metadata gives the width/height, and `P` gives the world
+ * coordinate where that origin belongs at the natural placement.
+ *
  * A patch may provide data for any subset of the layers understood by the
  * game. All provided layers share the same geometry and natural placement,
  * but remain independently stored.
@@ -91,14 +96,14 @@ public:
     }
 
 
-    /// Position where the author intended this patch to be placed.
+    /// World coordinate where Patch-local `(0, 0)` lies when naturally placed.
     [[nodiscard]] constexpr coord_type natural_position() const noexcept
     {
         return m_natural_position;
     }
 
 
-    /// Area covered by the authored data in patch-local coordinates.
+    /// Area covered by authored data in Patch-local coordinates; v1 starts at `(0, 0)`.
     [[nodiscard]] constexpr const area_type& local_area() const noexcept
     {
         return m_local_area;

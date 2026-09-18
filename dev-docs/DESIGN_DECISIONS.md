@@ -100,11 +100,21 @@ A separate full-Tile residency cache is not part of the current design. If one i
 
 **Why:** one authored house/barn/well/etc. should be reusable at several coordinates and orientations without copying authored layer data.
 
-Transform order is:
+Patch-local `(0, 0)` is the transform anchor. `Placement::position()` is the Map coordinate of that origin. Transform order is:
 
 ```text
 reflection -> rotation -> translation
 ```
+
+Conceptually:
+
+```text
+world = position + rotate(reflect(local))
+```
+
+Orientation happens about `(0, 0)` and does not renormalise the resulting bounds around a new top-left. A rotated/reflected Patch may therefore extend to negative coordinates relative to `Placement::position()`.
+
+For dense v1 authored sources, source-local `(0, 0)` is the same Patch-local origin; `D` gives the local rectangle size and `P` gives the natural world position of that origin.
 
 ## D-09 — Place is narrative identity
 

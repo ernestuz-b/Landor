@@ -199,6 +199,8 @@ Layer lookup is intentionally linear because the number of bound layers is expec
 
 Absence is returned as `nullptr`.
 
+Patch-local `(0, 0)` is the authored transform/source origin. For dense v1 authored sources, the source rectangle begins at that origin; its `D` dimensions match the authored local extent and its `P` position matches `Patch::natural_position()`.
+
 ### Authored layer source format
 
 `dev-docs/LAYER_SOURCE_FORMAT.md` defines the current version 1.0 authored source layout.
@@ -235,6 +237,8 @@ Orientation
 ```
 
 It does not point to its Patch and does not own authored data.
+
+`position` is specifically the Map coordinate of Patch-local `(0, 0)`. Reflection and rotation operate about that local origin, then translation adds `position`; the transformed bounds are not renormalised to a new top-left.
 
 This keeps placements safe to store/move independently and prevents accidental lifetime coupling to a Patch object.
 
@@ -492,11 +496,11 @@ Treat these as separate reviewable changes.
 
 ## 20. Next implementation slice
 
-The authored source file layout is pinned and now has a streaming parser/addressing helper (`src/world/layer_source.hpp`) with behavioural tests (`tests/world/test_layer_source.cpp`). The coordinate transform path and the procedural/default fallback still remain to be defined or implemented.
+The authored source file layout and Placement transform anchor are pinned, and the source format now has a streaming parser/addressing helper (`src/world/layer_source.hpp`) with behavioural tests (`tests/world/test_layer_source.cpp`). The coordinate-transform code and the procedural/default fallback still remain to be implemented/defined.
 
 The recommended order is:
 
-1. pin the procedural/default fallback contract and Placement-to-Patch-local transform needed by Map resolution;
+1. implement and test the Placement/world ↔ Patch/source-local coordinate transform using the pinned `(0, 0)` anchor contract; separately pin the procedural/default fallback contract needed by Map resolution;
 2. implement checked `value<LayerT>()` / residency on top of the streaming reader using those explicit contracts;
 3. implement checked `at()` by ensuring required layers then calling `Cache::tile()`;
 4. pin overlap/precedence semantics with tests as source resolution becomes concrete;

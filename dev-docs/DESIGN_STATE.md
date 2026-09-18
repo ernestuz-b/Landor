@@ -197,6 +197,8 @@ Patch does not know whether the source is a host file, SD-card file, flash, ROM 
 
 Patch owns no live placement state.
 
+Patch-local `(0, 0)` is the authored transform/source origin. In the dense v1 source format, authored source-local coordinates use that same origin, `D` describes the rectangle beginning there, and `P` is the world coordinate of that origin at the natural placement.
+
 ### 6.2 Placement
 
 A `Placement` is one live occurrence of a `Patch`.
@@ -208,11 +210,25 @@ It contains:
 - map position;
 - `Orientation`.
 
-Transform order is:
+`Placement::position()` is the Map coordinate of Patch-local `(0, 0)`. Transform order is:
 
 ```text
 reflection -> rotation -> translation
 ```
+
+So the forward mapping is conceptually:
+
+```text
+world = position + rotate(reflect(local))
+```
+
+The inverse mapping used for source lookup is conceptually:
+
+```text
+local = inverse_reflect(inverse_rotate(world - position))
+```
+
+Orientation does not renormalise the transformed rectangle; coordinates may become negative relative to the Placement anchor.
 
 Several Placements may reuse one Patch.
 
