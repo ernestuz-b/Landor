@@ -156,8 +156,9 @@ TEST(MapResult, ResultsCarryValuesAndErrors)
 
 TEST(MapResult, PublicCheckedAccessReturnsMapResult)
 {
-    // The access path is not implemented yet; these checks pin the declared
-    // return types without calling the unresolved methods.
+    // Both access paths are implemented and behaviourally covered by
+    // test_map_value.cpp and test_map_at.cpp; these checks pin the
+    // declared return types.
     static_assert(std::is_same_v<
         decltype(std::declval<const TestMap&>().template value<Fire>(
             std::declval<Coord32>())),

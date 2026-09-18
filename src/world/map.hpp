@@ -11,6 +11,7 @@
 #include "patch.hpp"
 #include "placement.hpp"
 #include "platform/storage/storage_filesystem.hpp"
+#include "runtime_layer_source.hpp"
 #include "tile.hpp"
 
 #include <algorithm>
@@ -203,6 +204,35 @@ using MapPlacementResult =
  * The exact replacement and write-back policy lives below this interface.
  *
  *
+ * Runtime layer bindings
+ * ----------------------
+ *
+ * Map also borrows the runtime layer binding catalogue:
+ *
+ *     std::span<const RuntimeLayerBinding>
+ *
+ * The span is scoped to this Map instance, so a binding `{ layer, source }`
+ * identifies the logical runtime/materialised overlay source of
+ * `(Map::id(), layer)` in the runtime storage role. The runtime identity is
+ * therefore (MapId, LayerId): one Map has at most one logical runtime
+ * overlay source per layer, and that source covers the Map's complete
+ * logical Area (see runtime_layer_source.hpp, DESIGN_DECISIONS.md D-35).
+ *
+ * The catalogue invariants are asserted in the constructor:
+ *
+ *   - every binding names a layer supported by this Map type;
+ *   - a LayerId appears at most once in the span. There is deliberately no
+ *     precedence between duplicates; a duplicate is invalid configuration,
+ *     not "first wins" or "last wins".
+ *
+ * Zero bindings means this Map currently has no persistent runtime overlay
+ * source for those layers. That is not the same as an unsupported layer.
+ *
+ * The catalogue is identity only. No current read or write path opens,
+ * reads or writes a runtime source through it, and SourceId allocation,
+ * registration and file creation remain open (see LAYER_STORAGE_MODEL.md).
+ *
+ *
  * Placements
  * ----------
  *
@@ -291,9 +321,9 @@ public:
     /**
      * Construct a live Map over an authored Patch catalogue.
      *
-     * Patch descriptors, both storage roles and the terminal fallback
-     * provider outlive the Map. Map borrows all of them and owns none of
-     * them.
+     * Patch descriptors, both storage roles, the runtime layer binding
+     * catalogue and the terminal fallback provider outlive the Map. Map
+     * borrows all of them and owns none of them.
      *
      * The two storage roles are semantic, not physical (see the class
      * documentation): authored_storage is the immutable/read source for
@@ -305,6 +335,15 @@ public:
      *
      * Current resolution consults the authored role only; the runtime role
      * is stored but not yet read or written.
+     *
+     * runtime_layers is the runtime layer binding catalogue, scoped to this
+     * Map instance (see the class documentation): a binding { layer, source }
+     * names the logical runtime overlay source of (Map::id(), layer) in
+     * runtime_storage. The constructor asserts the catalogue precondition:
+     * every binding names a layer supported by this Map type, and a LayerId
+     * appears at most once in the span. Zero bindings is valid and means
+     * this Map currently has no persistent runtime overlay source for those
+     * layers.
      *
      * The fallback provider is the final source of per-layer resolution. Map
      * queries it per layer and per in-Map world coordinate and receives
@@ -319,14 +358,17 @@ public:
         std::span<const patch_type> patches,
         const storage::Storage& authored_storage,
         storage::Storage& runtime_storage,
+        std::span<const RuntimeLayerBinding> runtime_layers,
         const fallback_type& fallback) noexcept
         : m_id(id),
           m_area(area),
           m_patches(patches),
           m_authored_storage(authored_storage),
           m_runtime_storage(runtime_storage),
+          m_runtime_layers(runtime_layers),
           m_fallback(fallback)
     {
+        assert(valid_runtime_layer_bindings<Layers...>(runtime_layers));
     }
 
 
@@ -688,6 +730,45 @@ public:
 
 
 private:
+    /**
+     * Find the runtime layer binding for one layer of this Map.
+     *
+     * Returns nullptr when this Map currently has no runtime overlay source
+     * bound for the layer. Absence does not mean that the layer is
+     * unsupported or cannot acquire live state; it only says that this Map
+     * instance has no persistent runtime source for it today.
+     *
+     * The span is already scoped to this Map instance, so a found binding
+     * names the logical source of (Map::id(), layer).
+     *
+     * The number of build-supported layers is small, so the lookup is
+     * intentionally linear. Do not add indexing machinery without a measured
+     * reason.
+     *
+     * Preparatory seam: no current read or write path consults the binding
+     * yet.
+     */
+    [[nodiscard]] constexpr const RuntimeLayerBinding*
+    runtime_binding(LayerId layer) const noexcept
+    {
+        for (const auto& entry : m_runtime_layers)
+        {
+            if (entry.layer == layer)
+                return &entry;
+        }
+
+        return nullptr;
+    }
+
+
+    template<Layer LayerT>
+    [[nodiscard]] constexpr const RuntimeLayerBinding*
+    runtime_binding() const noexcept
+    {
+        return runtime_binding(LayerT::id);
+    }
+
+
     /**
      * Resolve one complete canonical layer plane for one canonical Chunk.
      *
@@ -1161,6 +1242,22 @@ private:
      * fill both roles.
      */
     storage::Storage& m_runtime_storage;
+
+    /*
+     * Runtime layer binding catalogue: one entry per Map layer that
+     * currently has a persistent runtime overlay source. Scoped to this Map
+     * instance, so a binding { layer, source } means
+     * (Map::id(), layer) -> runtime SourceId source in m_runtime_storage.
+     *
+     * Borrowed; the backing records outlive the Map. Zero bindings means
+     * this Map currently has no persistent runtime overlay source for those
+     * layers, not that the layers are unsupported.
+     *
+     * Deliberately unused by any read or write path for now: it pins the
+     * identity seam required by the future runtime reader/write-back slice
+     * (LAYER_STORAGE_MODEL.md) without performing any I/O yet.
+     */
+    std::span<const RuntimeLayerBinding> m_runtime_layers;
 
     /*
      * Terminal fallback provider: the final source of per-layer resolution,

@@ -1,22 +1,22 @@
-// Behavioural tests for the two explicit Map storage roles:
-//
-//     const storage::Storage&   authored storage (immutable read source)
-//     storage::Storage&         runtime storage (writable persistence)
+// Behavioural and compile-time tests for the Map runtime layer binding
+// catalogue.
 //
 // The exercised facts:
 //
-//   - current authored resolution uses only the authored role: with the
-//     same SourceId present in two different roots, Map answers from the
-//     authored root, never from the runtime root;
-//   - the runtime role may be absent or irrelevant to current reads:
-//     authored access still succeeds when the runtime root holds no such
-//     source at all, and the absence is not an error;
-//   - the same Storage object may fill both roles; physical separation is
-//     optional.
+//   - Map constructs with an empty runtime binding span;
+//   - Map constructs with one runtime binding;
+//   - the old constructor without the runtime-binding span is no longer
+//     the contract;
+//   - the same Storage object can still be used for the authored and the
+//     runtime role at the same time as the binding catalogue;
+//   - runtime bindings cause zero runtime I/O today: a bound runtime source
+//     holding different bytes, or a runtime root with no such source at
+//     all, cannot change a current read.
 //
-// No runtime behaviour exists yet: in this slice Map never opens, reads or
-// writes the runtime storage. The constructor contract itself is pinned by
-// the header tripwire (tests/test_world_headers.cpp).
+// The private Map::runtime_binding() seam is deliberately not exposed; the
+// catalogue invariants are unit-tested through the free
+// valid_runtime_layer_bindings() helper in test_runtime_layer_source.cpp
+// and pinned here through construction behaviour.
 
 #include <gtest/gtest.h>
 
@@ -26,6 +26,7 @@
 #include "world/map.hpp"
 #include "world/patch.hpp"
 #include "world/runtime_layer_source.hpp"
+#include "storage/types.hpp"
 
 #include <array>
 #include <cstdint>
@@ -35,6 +36,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <type_traits>
 
 
 namespace
@@ -104,7 +106,7 @@ using TestMap = landor::geo::Map<2, 4, 4, ConstantFallback, Coord32, Terrain>;
 }
 
 
-class MapStorageRolesTest : public ::testing::Test
+class MapRuntimeCatalogueTest : public ::testing::Test
 {
 protected:
     static constexpr std::size_t source_count = 1;
@@ -114,7 +116,7 @@ protected:
     {
         std::error_code ec;
         m_base_path =
-            std::filesystem::temp_directory_path(ec) / "landor_map_storage_roles_test";
+            std::filesystem::temp_directory_path(ec) / "landor_map_runtime_catalogue_test";
         ASSERT_FALSE(ec) << ec.message();
 
         m_authored_root_path = m_base_path / "authored";
@@ -167,18 +169,18 @@ protected:
     // Dense source table shared by both roots; the string literal outlives
     // the fixture.
     std::array<std::string_view, source_count> m_sources {
-        "p_role.layer"
+        "p_rt.layer"
     };
 
     static constexpr Area32 k_area_4x4 {Coord32(0, 0), Coord32(3, 3)};
 
     // Binding table: declared before the catalogue so the span it lends is
     // already constructed when m_patches initialises.
-    std::array<LayerBinding, 1> role_bindings {{Terrain::id, SourceId {0}}};
+    std::array<LayerBinding, 1> catalogue_bindings {{Terrain::id, SourceId {0}}};
 
     // Catalogue: one 4x4 Patch bound to the single shared SourceId.
     std::array<Patch, 1> m_patches {
-        Patch {k_patch_id, "role", Coord32(0, 0), k_area_4x4, std::span(role_bindings)}
+        Patch {k_patch_id, "rt", Coord32(0, 0), k_area_4x4, std::span(catalogue_bindings)}
     };
     static constexpr Area32 k_map_area {Coord32(0, 0), Coord32(15, 15)};
 
@@ -193,47 +195,81 @@ protected:
 };
 
 
-TEST_F(MapStorageRolesTest, AuthoredResolutionUsesOnlyTheAuthoredStorage)
+// --- Constructor contract -----------------------------------------------------
+
+TEST(MapRuntimeCatalogue, ConstructorRequiresTheRuntimeBindingSpan)
 {
-    // Both roots carry the same SourceId table, and the same logical
-    // source holds different bytes in each role: 'A' in the authored root,
-    // 'R' in the runtime root.
+    // The current constructor takes the runtime binding span between the
+    // runtime storage role and the fallback provider.
+    static_assert(
+        std::is_constructible_v<
+            TestMap,
+            landor::geo::MapId,
+            Area32,
+            std::span<const Patch>,
+            const Storage&,
+            Storage&,
+            std::span<const RuntimeLayerBinding>,
+            const ConstantFallback&>);
+
+    // The old two-storage constructor without the span is no longer
+    // constructible.
+    static_assert(
+        !std::is_constructible_v<
+            TestMap,
+            landor::geo::MapId,
+            Area32,
+            std::span<const Patch>,
+            const Storage&,
+            Storage&,
+            const ConstantFallback&>);
+
+    SUCCEED();
+}
+
+
+// --- Empty catalogue ------------------------------------------------------------
+
+TEST_F(MapRuntimeCatalogueTest, EmptyRuntimeBindingSpanConstructsAndReadsAuthored)
+{
+    write_source(m_authored_root_path, make_layer_file(4, 4, 0, 0, rows_a));
+
+    Storage authored_storage {m_authored_root, m_sources};
+    Storage runtime_storage {m_runtime_root, m_sources};
+    ConstantFallback fallback {};
+    TestMap map {
+        1,
+        k_map_area,
+        std::span<const Patch> {m_patches},
+        authored_storage,
+        runtime_storage,
+        std::span<const RuntimeLayerBinding> {},
+        fallback
+    };
+
+    const auto placed = map.place(k_patch_id, Coord32(0, 0));
+    ASSERT_TRUE(placed.has_value());
+
+    // Zero bindings changes nothing about current reads.
+    const auto result = map.value<Terrain>(Coord32(2, 1));
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, static_cast<std::uint8_t>('A'));
+}
+
+
+// --- One binding, zero runtime I/O ---------------------------------------------
+
+TEST_F(MapRuntimeCatalogueTest, OneRuntimeBindingStillReadsAuthoredOnly)
+{
+    // Both roots carry the same SourceId table. The runtime root holds a
+    // different byte ('R') at the probe cell behind the bound SourceId, so
+    // any runtime read would have changed the answer.
     write_source(m_authored_root_path, make_layer_file(4, 4, 0, 0, rows_a));
     write_source(m_runtime_root_path, make_layer_file(4, 4, 0, 0, rows_r));
 
-    Storage authored_storage {m_authored_root, m_sources};
-    Storage runtime_storage {m_runtime_root, m_sources};
-    ConstantFallback fallback {};
-    TestMap map {
-        1,
-        k_map_area,
-        std::span<const Patch> {m_patches},
-        authored_storage,
-        runtime_storage,
-        std::span<const RuntimeLayerBinding> {},
-        fallback
+    const std::array<RuntimeLayerBinding, 1> runtime_layers {
+        {Terrain::id, SourceId {0}}
     };
-
-    const auto placed = map.place(k_patch_id, Coord32(0, 0));
-    ASSERT_TRUE(placed.has_value());
-
-    // Current authored resolution must answer from the authored role only.
-    const auto result = map.value<Terrain>(Coord32(2, 1));
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(*result, static_cast<std::uint8_t>('A'));
-
-    // The rest of the plane also comes from the authored source.
-    const auto corner = map.value<Terrain>(Coord32(0, 0));
-    ASSERT_TRUE(corner.has_value());
-    EXPECT_EQ(*corner, static_cast<std::uint8_t>('q'));
-}
-
-
-TEST_F(MapStorageRolesTest, RuntimeSourceMayBeAbsentWithoutAffectingAuthoredAccess)
-{
-    // Only the authored root contains the source; the runtime root holds
-    // nothing at all for this SourceId.
-    write_source(m_authored_root_path, make_layer_file(4, 4, 0, 0, rows_a));
 
     Storage authored_storage {m_authored_root, m_sources};
     Storage runtime_storage {m_runtime_root, m_sources};
@@ -244,25 +280,64 @@ TEST_F(MapStorageRolesTest, RuntimeSourceMayBeAbsentWithoutAffectingAuthoredAcce
         std::span<const Patch> {m_patches},
         authored_storage,
         runtime_storage,
-        std::span<const RuntimeLayerBinding> {},
+        std::span<const RuntimeLayerBinding> {runtime_layers},
         fallback
     };
 
     const auto placed = map.place(k_patch_id, Coord32(0, 0));
     ASSERT_TRUE(placed.has_value());
 
-    // The absent runtime source is not consulted, so it is not an error.
+    // The bound runtime source is not consulted, so the authored byte
+    // answers.
     const auto result = map.value<Terrain>(Coord32(2, 1));
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(*result, static_cast<std::uint8_t>('A'));
 }
 
 
-TEST_F(MapStorageRolesTest, SameStorageObjectSatisfiesBothRoles)
+TEST_F(MapRuntimeCatalogueTest, BoundSourceMayBeAbsentInRuntimeStorage)
 {
+    // Only the authored root contains the source. The binding names a
+    // SourceId that does not exist in the runtime root; no read of the
+    // runtime role happens, so its absence is not an error.
     write_source(m_authored_root_path, make_layer_file(4, 4, 0, 0, rows_a));
 
-    // One physical Storage object fills both roles.
+    const std::array<RuntimeLayerBinding, 1> runtime_layers {
+        {Terrain::id, SourceId {0}}
+    };
+
+    Storage authored_storage {m_authored_root, m_sources};
+    Storage runtime_storage {m_runtime_root, m_sources};
+    ConstantFallback fallback {};
+    TestMap map {
+        1,
+        k_map_area,
+        std::span<const Patch> {m_patches},
+        authored_storage,
+        runtime_storage,
+        std::span<const RuntimeLayerBinding> {runtime_layers},
+        fallback
+    };
+
+    const auto placed = map.place(k_patch_id, Coord32(0, 0));
+    ASSERT_TRUE(placed.has_value());
+
+    const auto result = map.value<Terrain>(Coord32(2, 1));
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, static_cast<std::uint8_t>('A'));
+}
+
+
+TEST_F(MapRuntimeCatalogueTest, SameStorageObjectFillsBothRolesWithABinding)
+{
+    // One physical Storage object fills both semantic roles while the
+    // binding catalogue is non-empty.
+    write_source(m_authored_root_path, make_layer_file(4, 4, 0, 0, rows_a));
+
+    const std::array<RuntimeLayerBinding, 1> runtime_layers {
+        {Terrain::id, SourceId {0}}
+    };
+
     Storage storage {m_authored_root, m_sources};
     ConstantFallback fallback {};
     TestMap map {
@@ -271,31 +346,16 @@ TEST_F(MapStorageRolesTest, SameStorageObjectSatisfiesBothRoles)
         std::span<const Patch> {m_patches},
         storage,
         storage,
-        std::span<const RuntimeLayerBinding> {},
+        std::span<const RuntimeLayerBinding> {runtime_layers},
         fallback
     };
 
     const auto placed = map.place(k_patch_id, Coord32(0, 0));
     ASSERT_TRUE(placed.has_value());
 
-    const auto authored = map.value<Terrain>(Coord32(2, 1));
-    ASSERT_TRUE(authored.has_value());
-    EXPECT_EQ(*authored, static_cast<std::uint8_t>('A'));
-
-    // With no authored coverage the terminal fallback still answers.
-    TestMap fallback_map {
-        1,
-        k_map_area,
-        std::span<const Patch> {},
-        storage,
-        storage,
-        std::span<const RuntimeLayerBinding> {},
-        fallback
-    };
-
-    const auto baseline = fallback_map.value<Terrain>(Coord32(2, 1));
-    ASSERT_TRUE(baseline.has_value());
-    EXPECT_EQ(*baseline, 0);
+    const auto result = map.value<Terrain>(Coord32(2, 1));
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, static_cast<std::uint8_t>('A'));
 }
 
 } // namespace

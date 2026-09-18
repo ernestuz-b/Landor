@@ -31,6 +31,7 @@ add_executable(Landor
     src/world/layer_source.hpp
     src/world/layer_fallback.hpp
     src/world/authored_layer_source.hpp
+    src/world/runtime_layer_source.hpp
     src/storage/storage_contract.hpp
     src/platform/storage/storage_filesystem.hpp
 )
@@ -106,6 +107,8 @@ if(LANDOR_BUILD_TESTS)
         tests/world/test_map_value.cpp
         tests/world/test_map_at.cpp
         tests/world/test_map_storage_roles.cpp
+        tests/world/test_runtime_layer_source.cpp
+        tests/world/test_map_runtime_catalogue.cpp
 
         # Behavioural tests mirroring src/platform/storage/.
         tests/platform/storage/test_storage_filesystem.cpp

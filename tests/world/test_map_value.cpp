@@ -25,6 +25,7 @@
 #include "world/orientation.hpp"
 #include "world/patch.hpp"
 #include "world/placement.hpp"
+#include "world/runtime_layer_source.hpp"
 
 #include <array>
 #include <cstdint>
@@ -52,6 +53,7 @@ using landor::geo::MapErrorCode;
 using landor::geo::Orientation;
 using landor::geo::PlacementId;
 using landor::geo::Rotation;
+using landor::geo::RuntimeLayerBinding;
 using landor::storage::SourceId;
 using landor::storage::Storage;
 
@@ -304,6 +306,7 @@ TEST_F(MapValueTest, FallbackOnlyValueComesFromTheTerminalFallback)
         std::span<const Patch> {},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -331,6 +334,7 @@ TEST_F(MapValueTest, SecondQueryInTheSameChunkUsesResidentState)
         std::span<const Patch> {},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -359,6 +363,7 @@ TEST_F(MapValueTest, OutOfBoundsIsDetectedBeforeAnyResolutionWork)
         std::span<const Patch> {},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -387,6 +392,7 @@ TEST_F(MapValueTest, BoundaryChunkFallsBackOnlyForLogicalMapCells)
         std::span<const Patch> {},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -421,6 +427,7 @@ TEST_F(MapValueTest, SecondSpatialChunkFailsWhenTheCacheHasNoFreeSlot)
         std::span<const Patch> {},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -451,6 +458,7 @@ TEST_F(MapValueTest, AuthoredByteOverridesTheFallback)
         std::span<const Patch> {m_patches},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -488,6 +496,7 @@ TEST_F(MapValueTest, PatchWithoutALayerBindingLetsTheFallbackWin)
         std::span<const Patch> {m_patches},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -513,6 +522,7 @@ TEST_F(MapValueTest, SpaceCellContributesNothingSoTheFallbackWins)
         std::span<const Patch> {m_patches},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -541,6 +551,7 @@ TEST_F(MapValueTest, RotatedPlacementMapsSourceCellsToRotatedWorldCells)
         std::span<const Patch> {m_patches},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -575,6 +586,7 @@ TEST_F(MapValueTest, LaterPlacementOverlaysTheEarlierOne)
         std::span<const Patch> {m_patches},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -604,6 +616,7 @@ TEST_F(MapValueTest, HigherPlacementWithASpaceCellShowsTheLowerThrough)
         std::span<const Patch> {m_patches},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -638,6 +651,7 @@ TEST_F(MapValueTest, MalformedDataFromTheReaderReachesTheCallerUnchanged)
         std::span<const Patch> {m_patches},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -668,6 +682,7 @@ TEST_F(MapValueTest, PatchSourceGeometryMismatchReachesTheCallerUnchanged)
         std::span<const Patch> {m_patches},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -700,6 +715,7 @@ TEST_F(MapValueTest, CompletelyHiddenLowerSourceIsNeverOpened)
         std::span<const Patch> {m_patches},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -728,6 +744,7 @@ TEST_F(MapValueTest, MovingTheWinningPlacementInvalidatesTheResidentChunk)
         std::span<const Patch> {m_patches},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 

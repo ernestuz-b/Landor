@@ -21,6 +21,7 @@
 #include "world/map.hpp"
 #include "world/map_result.hpp"
 #include "world/patch.hpp"
+#include "world/runtime_layer_source.hpp"
 #include "world/tile.hpp"
 
 #include <array>
@@ -48,6 +49,7 @@ using landor::geo::LayerSourceError;
 using landor::geo::MapError;
 using landor::geo::MapErrorCode;
 using landor::geo::PlacementId;
+using landor::geo::RuntimeLayerBinding;
 using landor::storage::SourceId;
 using landor::storage::Storage;
 
@@ -328,6 +330,7 @@ TEST_F(MapAtTest, FallbackOnlyTileAssemblesEveryLayer)
         std::span<const Patch> {},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -368,6 +371,7 @@ TEST_F(MapAtTest, OutOfBoundsIsDetectedBeforeAnyResolutionWork)
         std::span<const Patch> {m_patches},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -401,6 +405,7 @@ TEST_F(MapAtTest, ExistingLayerResidencyIsReused)
         std::span<const Patch> {},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -432,6 +437,7 @@ TEST_F(MapAtTest, SecondAtCallPacksFromResidentState)
         std::span<const Patch> {},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -462,6 +468,7 @@ TEST_F(MapAtTest, AuthoredLayerDoesNotHideTheOther)
         std::span<const Patch> {m_patches},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -501,6 +508,7 @@ TEST_F(MapAtTest, PerLayerPrecedenceIsResolvedIndependently)
         std::span<const Patch> {m_patches},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -535,6 +543,7 @@ TEST_F(MapAtTest, SpaceCellFallsThroughPerLayer)
         std::span<const Patch> {m_patches},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -570,6 +579,7 @@ TEST_F(MapAtTest, FailureStopsAtTheFailingLayerInDeclaredOrder)
         std::span<const Patch> {m_patches},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -623,6 +633,7 @@ TEST_F(MapAtTest, ResidencyFollowsTheDeclaredOrderNotTheLayerIds)
         std::span<const Patch> {m_patches},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -653,6 +664,7 @@ TEST_F(MapAtTest, CacheFullWhenTheSecondSpatialChunkNeedsANewSlot)
         std::span<const Patch> {},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -687,6 +699,7 @@ TEST_F(MapAtTest, MovingTheWinningPlacementInvalidatesTheMultiLayerTile)
         std::span<const Patch> {m_patches},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 
@@ -724,6 +737,7 @@ TEST_F(MapAtTest, ReturnedTileIsAnOwnedValue)
         std::span<const Patch> {},
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 

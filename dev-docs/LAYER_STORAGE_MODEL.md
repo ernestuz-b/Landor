@@ -88,7 +88,9 @@ For example, if two Placements both use `GoodMagePalace`, a fire or terrain chan
 
 Runtime persistence must consequently identify the live world occurrence or world area whose state it represents.
 
-The exact runtime naming convention and the exact mapping from live world state to `storage::SourceId` are deliberately not pinned yet. They should be defined when the runtime-source manager/write-back path is implemented.
+The runtime identity is now pinned (see `DESIGN_DECISIONS.md`, D-35): a runtime source belongs to `(MapId, LayerId)` — one logical runtime overlay source per Map layer — and its geometry is the complete Map area (`P` = Map area minimum, `D` = Map area extent), with source-local `(0, 0)` equal to the Map's minimum world coordinate. The runtime overlay belongs to Map world coordinates, not to the authored object that originally supplied the value: if Fire at a world coordinate changes at runtime, persistence goes through that Map's Fire runtime source, never through `GoodMagePalace.Fire` authored source, and a second placement of the same Patch is unaffected. No Placement or Patch transform participates.
+
+What remains deliberately unpinned is the physical side: the exact runtime filename/naming convention, the exact `SourceId` allocation/registration for that identity, and file creation. They should be defined when the runtime-source manager/write-back path is implemented.
 
 The authored filename convention:
 
@@ -96,7 +98,7 @@ The authored filename convention:
 <PatchName>.<LayerName>.layer
 ```
 
-must not be reused blindly as a runtime identity scheme, because Patch name alone is insufficient to distinguish multiple Placements.
+must not be reused blindly as a runtime identity scheme, because Patch name alone is insufficient to identify a Map layer.
 
 ## Read resolution
 
@@ -176,14 +178,17 @@ Runtime Storage
 
 These may happen to be the same backend or physical device on a host build, but no design may require that.
 
-The `Map` source contract now borrows two explicit storage roles:
+The `Map` source contract now borrows two explicit storage roles and the runtime layer binding catalogue:
 
 ```cpp
-const storage::Storage&   authored storage
-storage::Storage&         runtime storage
+const storage::Storage&                authored storage
+storage::Storage&                      runtime storage
+std::span<const RuntimeLayerBinding>   runtime layers
 ```
 
 Existing authored resolution uses the authored storage only: `open_layer_source()` and `read_cells()` inside `Map::resolve_chunk<LayerT>()` receive the authored reference, so Map never reads from or writes to the runtime role. The runtime storage reference is stored, deliberately unused by resolution, and pinned in the Map constructor/lifetime seam for the future runtime reader/write-back slice. No runtime overlay resolution, runtime SourceId mapping or write-back exists yet.
+
+The binding catalogue is identity only: a binding `{ layer, source }` names the logical runtime source of `(Map::id(), layer)` in the runtime storage role, and the Map constructor asserts that every binding names a layer supported by the Map type and that no `LayerId` appears twice (D-35). No read or write path consults the catalogue yet, so it performs no I/O today.
 
 Both references currently use the build-selected `storage::Storage` type. That is current source reality, not a permanent architectural prohibition against heterogeneous authored/runtime backing implementations on a concrete target.
 
@@ -217,13 +222,12 @@ This document does not yet define:
 
 - runtime source filenames;
 - runtime `SourceId` allocation/registration;
-- whether runtime sources are per Placement, per world area, per save slot, or another concrete partitioning;
 - runtime file creation API;
+- runtime/materialized override precedence above authored Placements (the runtime source identity/geometry itself is pinned by D-35, and authored precedence is pinned by D-34);
 - dirty-state granularity;
 - write-back scheduling;
 - crash consistency or atomic replacement policy;
 - cache eviction policy;
-- exact authored Placement precedence;
 - procedural/default fallback API.
 
 Those are implementation decisions to make with concrete Map persistence requirements. The contract already fixed is simpler: **authored files are immutable; runtime files are writable overlays/materialized state; both use the same `.layer` format; runtime storage may be physically separate from authored storage; and normal gameplay accesses both incrementally through the Cache rather than loading whole files into memory.**

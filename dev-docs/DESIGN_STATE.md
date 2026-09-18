@@ -278,6 +278,14 @@ The Map:
   (immutable read source) and a mutable runtime Storage reference (writable
   persistence for future materialisation/write-back); the same Storage
   object may fill both roles;
+- borrows the runtime layer binding catalogue
+  (`std::span<const RuntimeLayerBinding>`, D-35): one logical runtime
+  overlay source per Map layer, identified by `(MapId, LayerId)`; the span
+  is scoped to this Map instance, every binding must name a layer supported
+  by the Map type, and a `LayerId` appears at most once in the span (a
+  duplicate is invalid configuration, not a precedence case); zero bindings
+  means the Map currently has no persistent runtime overlay source for those
+  layers, not that the layer is unsupported;
 - borrows a typed terminal fallback provider as the final, always-answerable
   source of per-layer resolution;
 - resolves each supported layer independently;
@@ -299,7 +307,7 @@ resident Cache
     -> terminal fallback provider (procedural baseline or layer default)
 ```
 
-A Placement declines a cell — resolution then continues downward — when its Patch has no binding for the layer, the world coordinate is outside its transformed Patch, or the authored cell is ASCII space `0x20`. The square-bracketed step is future work: the runtime storage role is stored on Map but not yet consulted by any read or write, and existing authored resolution uses the authored storage role only.
+A Placement declines a cell — resolution then continues downward — when its Patch has no binding for the layer, the world coordinate is outside its transformed Patch, or the authored cell is ASCII space `0x20`. The square-bracketed step is future work: the runtime storage role is stored on Map and the runtime layer binding catalogue is borrowed, but neither is yet consulted by any read or write, and existing authored resolution uses the authored storage role only. The logical identity and geometry behind that step are now pinned (D-35): one logical runtime overlay source per Map layer, covering the complete Map area with `P` = the Map area minimum and `D` = the Map area extent, world-oriented and independent of `CacheChunkSide`.
 
 Missing canonical Cache layer Chunks are connected to that source-resolution path through the same chunk-plane seam, which now serves both checked point-access paths: `value<LayerT>()` returns one resident layer value, and `at()` ensures every supported layer is resident in the Map template's declared layer order (fail-fast, returning the exact first `MapError` unchanged), then packs the complete owned `Tile` through `Cache::tile()`. Both validate that the coordinate belongs to the Map before any residency work. No storage format beyond the repository's existing contracts is used.
 
@@ -590,7 +598,7 @@ Mapping-specific details belong in `MAPPING_MODEL.md` and must remain consistent
 The following remain intentionally open:
 
 - final mutation API between simulations and materialized layer state;
-- runtime/materialized override precedence above authored Placements (authored precedence itself is pinned by D-34);
+- runtime/materialized override precedence above authored Placements (runtime source identity and geometry are pinned by D-35; authored precedence itself is pinned by D-34);
 - exact source/layer/spatial-coordinate to byte-range mapping where not already defined by a concrete format;
 - Cache replacement policy;
 - dirty-state/write-back policy;

@@ -26,6 +26,7 @@
 #include "world/patchset.hpp"
 #include "world/place.hpp"
 #include "world/placement.hpp"
+#include "world/runtime_layer_source.hpp"
 #include "world/tile.hpp"
 
 #include <array>
@@ -109,15 +110,26 @@ TEST(WorldHeaders, MapPlacementResultTypesMatchTheLifecycleContract)
 }
 
 
-TEST(WorldHeaders, MapConstructorBorrowsBothStorageRolesAndFallback)
+TEST(WorldHeaders, MapConstructorBorrowsStorageRolesRuntimeBindingsAndFallback)
 {
     // Pins the Map construction seam: the constructor takes the two explicit
     // storage roles — the const-borrowed authored Storage and the
-    // mutable-borrowed runtime Storage — plus the const-borrowed terminal
-    // fallback provider. The old single-Storage constructor is no longer the
+    // mutable-borrowed runtime Storage — the borrowed runtime layer binding
+    // catalogue, and the const-borrowed terminal fallback provider. The old
+    // constructors without the runtime binding span are no longer the
     // contract.
     static_assert(
         std::is_constructible_v<
+            TestMap,
+            landor::geo::MapId,
+            TestMap::area_type,
+            std::span<const TestMap::patch_type>,
+            const landor::storage::Storage&,
+            landor::storage::Storage&,
+            std::span<const landor::geo::RuntimeLayerBinding>,
+            const TestMap::fallback_type&>);
+    static_assert(
+        !std::is_constructible_v<
             TestMap,
             landor::geo::MapId,
             TestMap::area_type,

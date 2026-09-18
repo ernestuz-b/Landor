@@ -30,6 +30,7 @@
 #include "world/orientation.hpp"
 #include "world/patch.hpp"
 #include "world/placement.hpp"
+#include "world/runtime_layer_source.hpp"
 
 #include <array>
 #include <cstdint>
@@ -52,6 +53,7 @@ using landor::geo::PatchId;
 using landor::geo::PlacementId;
 using landor::geo::Reflection;
 using landor::geo::Rotation;
+using landor::geo::RuntimeLayerBinding;
 
 /// Byte-sized test layer, matching the header-tripwire test layer.
 struct Fire
@@ -145,6 +147,7 @@ struct MapPlacementTest : ::testing::Test
         patches,
         storage,
         storage,
+        std::span<const RuntimeLayerBinding> {},
         fallback
     };
 };

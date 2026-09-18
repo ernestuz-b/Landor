@@ -660,6 +660,8 @@ The cache exists solely to make residency and I/O efficient.
 
 It must not leak into normal game code.
 
+Cache residency is temporary and is not persistence identity: a layer's persistent identity belongs to its authored/runtime sources (see `LAYER_STORAGE_MODEL.md` and D-35). Changing the cache granularity must not change saved-world identity.
+
 ### Layers remain fundamental through cache residency
 
 Layer-oriented organisation belongs to the stored, authored and procedural sources, and it does not end at cache ingress.

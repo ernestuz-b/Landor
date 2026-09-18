@@ -310,3 +310,34 @@ The SPSC publication rules must follow the modern C++ memory model.
 **Decision:** when several Placements cover the same world coordinate, authored resolution is ordered by stable Placement identity: a higher `PlacementId` has higher precedence, so a later successful placement overlays an earlier one. The rule is per-layer — a Placement only participates in a layer it binds — and it follows the monotonic id, not the array-slot order a Placement happens to occupy. A Placement declines a cell, letting lower Placements and then the terminal fallback continue, when its Patch has no binding for the layer, the world coordinate is outside its transformed Patch, or the authored cell carries no contribution (ASCII space `0x20`).
 
 **Why:** `PlacementId`s start at one, increase monotonically and are never reused, so "later successful placement" is already represented by the stable identity the game code carries. Making the id the precedence key removes a hidden dependency on internal array layout, gives story-facing code a predictable answer about which occurrence wins, and matches the intended authored-overwrite reading of overlap. Per-layer participation keeps a missing authored layer distinct from an unsupported layer: a Placement that does not bind a layer hides nothing, and a space cell is authored absence, not a runtime zero.
+
+## D-35 — Runtime overlay identity is MapId + LayerId
+
+**Decision:** the logical identity of a runtime/materialised `.layer` source is `(MapId, LayerId)`:
+
+```text
+one Map
+    × one Layer
+        = at most one logical runtime overlay source
+```
+
+The runtime source covers the Map's complete logical `Area`, with its geometry pinned to that area:
+
+```text
+P = map.area().min()
+D = map.area().max() - map.area().min() + 1
+```
+
+Source-local coordinates are therefore `world - map.area().min()`, with source-local `(0, 0)` equal to the Map's minimum world coordinate. No Placement transform and no Patch participates in the identity or the geometry: runtime state is world-oriented. Runtime identity is independent of `CacheChunkSide` and of Cache residency; the Cache is temporary residency, not persistence identity.
+
+Map carries the binding catalogue as a borrowed `std::span<const RuntimeLayerBinding>` (`src/world/runtime_layer_source.hpp`) scoped to the Map instance; a binding `{ layer, source }` means `(Map::id(), layer) -> runtime SourceId source`. The catalogue precondition is asserted in the Map constructor: every binding names a layer supported by the Map type, and a `LayerId` appears at most once in the span. There is no precedence between duplicate bindings; a duplicate is invalid configuration, not "first wins" or "last wins". Zero bindings means the Map currently has no persistent runtime overlay source for those layers; it does not mean the layer is unsupported. `validate_runtime_layer_source()` checks an already-parsed layout against the Map area with wide signed intermediates: it never uses `Area::width()`/`height()` (narrow full extents wrap them) and never narrows the source `P` into the Map coordinate type first, so an out-of-range position reports a mismatch instead of wrapping.
+
+**Why:**
+
+- persistence identity must not depend on the current Cache chunk size, which is an implementation choice and may change independently of saved-world identity;
+- moving or replacing authored Placements must not move runtime state: the runtime overlay belongs to Map world coordinates, not to the authored object that originally supplied a value;
+- two Placements sharing a Patch must remain independent in world state: a runtime change under one occurrence persists through the Map's layer source, never through the shared Patch's authored source;
+- the existing dense `.layer` format and direct addressing remain usable for the runtime role without new physical assumptions;
+- the runtime backing source may be much larger than RAM without being loaded, rewritten or materialised in whole, and Storage remains free to represent the logical source however its backend requires.
+
+The decision pins the **logical** source. It does not require a filesystem backend to allocate or load the complete object in RAM, and it does not pin physical file naming, `SourceId` allocation/registration, file creation, or write-back policy.
