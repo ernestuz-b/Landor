@@ -382,6 +382,11 @@ public:
      * asks Cache to pack those values together with the coordinate into a
      * Tile.
      *
+     * The bounds decision happens before any Cache population, Storage read,
+     * authored-source opening or fallback call. Layer residency is processed
+     * in the Map template's declared layer order and fails fast on the first
+     * failing layer (see ensure_resident()).
+     *
      * The returned Tile owns its values. Later cache replacement, storage
      * activity or managed-heap compaction cannot invalidate it.
      *
@@ -390,7 +395,24 @@ public:
      * MapErrorCode::CacheFull when the bounded Cache cannot accept a required
      * chunk, or the exact lower-level source error from resolution.
      */
-    [[nodiscard]] MapResult<tile_type> at(coord_type position) const;
+    [[nodiscard]] MapResult<tile_type> at(coord_type position) const
+    {
+        // Checked access: the bounds decision happens before any cache,
+        // source or fallback work.
+        if (!contains(position))
+        {
+            return std::unexpected(MapErrorCode::OutOfBounds);
+        }
+
+        const auto resident = ensure_resident(position);
+        if (!resident)
+        {
+            return std::unexpected(resident.error());
+        }
+
+        // Cache::tile() is the presentation boundary that packs the Tile.
+        return m_cache.tile(position);
+    }
 
 
     /** Convenience checked access from scalar coordinates. */
@@ -882,16 +904,59 @@ private:
      * Ensure that every layer required for a complete Tile is resident at
      * position.
      *
-     * The implementation promotes the request to CacheChunkSide-aligned
-     * Chunks and fills missing layer Chunks through resolve_chunk()/Storage.
+     * The layers are processed in the Map template's declared order
+     * (Layers...), not sorted by LayerId, and each one goes through exactly
+     * the same per-layer residency path as value<LayerT>(): a resident layer
+     * passes through unchanged, a missing layer resolves its canonical Chunk
+     * and installs it through Cache::fill<LayerT>().
+     *
+     * The walk fails fast in that order: the first failing layer ends the
+     * operation and its exact MapError is returned without being flattened or
+     * translated. No layer declared after the failing one is attempted. There
+     * is no rollback; already-resident planes remain resident, and partial
+     * residency after a failure is valid.
      *
      * Fails with MapErrorCode::CacheFull when a required chunk would need a
      * spatial slot the bounded Cache cannot provide; source resolution
      * failures surface as their exact lower-level errors.
-     *
-     * Pending: this form serves the not-yet-implemented Map::at().
      */
-    [[nodiscard]] MapResult<void> ensure_resident(coord_type position) const;
+    [[nodiscard]] MapResult<void> ensure_resident(coord_type position) const
+    {
+        MapError first_error {};
+
+        // The && fold preserves the declared layer order and short-circuits
+        // on the first failure, so no later-declared layer is attempted.
+        const bool all_resident = (true && ... &&
+            ensure_layer_resident<Layers>(position, first_error));
+
+        if (!all_resident)
+        {
+            return std::unexpected(first_error);
+        }
+
+        return {};
+    }
+
+
+    /**
+     * One step of the multi-layer residency walk: ensure one layer is
+     * resident at position, recording its exact error in first_error on
+     * failure so the walk can fail fast in declared layer order.
+     */
+    template<Layer LayerT>
+        requires (std::same_as<LayerT, Layers> || ...)
+    [[nodiscard]] bool
+    ensure_layer_resident(coord_type position, MapError& first_error) const
+    {
+        const auto layer = ensure_resident<LayerT>(position);
+        if (!layer)
+        {
+            first_error = layer.error();
+            return false;
+        }
+
+        return true;
+    }
 
 
     /**

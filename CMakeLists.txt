@@ -104,6 +104,7 @@ if(LANDOR_BUILD_TESTS)
         tests/world/test_map_placement.cpp
         tests/world/test_map_result.cpp
         tests/world/test_map_value.cpp
+        tests/world/test_map_at.cpp
 
         # Behavioural tests mirroring src/platform/storage/.
         tests/platform/storage/test_storage_filesystem.cpp

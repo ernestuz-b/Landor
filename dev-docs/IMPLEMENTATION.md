@@ -341,15 +341,17 @@ It covers procedural baseline generation or a fixed layer default behind that op
 
 ### Access
 
-Public Map access is intended to be checked.
+Public Map access is checked.
 
-`Map::at(position)` should:
+`Map::at(position)` is implemented:
 
 ```text
 validate position
-    -> ensure every required layer is resident
+    -> ensure every supported layer is resident (declared layer order, fail-fast)
     -> ask Cache to pack a Tile
 ```
+
+It validates the coordinate first (OutOfBounds before any cache, source or fallback work); the non-template `ensure_resident()` then walks the supported layers in the Map template's declared order, resolving only the missing ones through the chunk-plane seam below and failing fast on the first failure with that exact `MapError`; on success `Cache::tile()` packs the complete owned `Tile`. The scalar overload `at(x, y)` forwards to `at(coord_type{x, y})`.
 
 `Map::value<LayerT>(position)` is implemented: it validates the coordinate first (OutOfBounds before any cache, source or fallback work), ensures only the requested layer is resident through the chunk-plane seam below, and returns the resident layer value from the Cache.
 
@@ -364,13 +366,13 @@ MapResult<T> = std::expected<T, MapError>
 
 - `Map::at(position)` and `Map::at(x, y)` return `MapResult<tile_type>`;
 - `Map::value<LayerT>(position)` returns `MapResult<LayerT::value_type>`;
-- the private seam is the chunk-plane resolver `resolve_chunk<LayerT>(chunk, values)`, which returns `MapResult<void>` and resolves one complete canonical layer plane without heap allocation; the templated `ensure_resident<LayerT>()` is implemented, and the non-template `ensure_resident()` (for the pending `at()`) remains a declaration; both return `MapResult<void>`.
+- the private seam is the chunk-plane resolver `resolve_chunk<LayerT>(chunk, values)`, which returns `MapResult<void>` and resolves one complete canonical layer plane without heap allocation; both the templated `ensure_resident<LayerT>()` and the non-template `ensure_resident()` are implemented, and both return `MapResult<void>`; the non-template form walks the declared layer pack in the Map template's declared order, resolves only the layers not yet resident, fails fast, and returns the exact first `MapError` unchanged.
 
 `MapErrorCode` carries the Map-local outcomes: `OutOfBounds` (the coordinate does not belong to the Map; checked before Cache/Storage work) and `CacheFull` (the bounded Cache cannot accept another spatial slot; no eviction policy exists yet). The lower-level source errors are preserved rather than flattened: the exact `LayerSourceError` and the exact `AuthoredLayerSourceError`. `storage::Error` never appears in `MapError`; the layer source reader already maps Storage failures to `LayerSourceError::StorageFailed`.
 
 A `Placement::world_to_local()` that returns `nullopt` while testing whether a Placement contributes at one world coordinate is not a Map error: that Placement simply does not contribute there, so no transform failure belongs in `MapError`.
 
-Unsupported layer types remain compile-time errors. The single-layer access path is implemented and tested; the multi-layer `at()` path is declared but not implemented yet.
+Unsupported layer types remain compile-time errors. Both the single-layer `value<LayerT>()` path and the multi-layer `at()` path are implemented and tested.
 
 ### Residency population
 
@@ -523,6 +525,7 @@ tests/world/test_placement.cpp
 tests/world/test_map_placement.cpp
 tests/world/test_map_result.cpp
 tests/world/test_map_value.cpp
+tests/world/test_map_at.cpp
 ```
 
 Filesystem Storage tests live under:
@@ -562,13 +565,12 @@ Treat these as separate reviewable changes.
 
 The authored source file layout and Placement transform anchor are pinned, the source format now has a streaming parser/addressing helper (`src/world/layer_source.hpp`) with behavioural tests (`tests/world/test_layer_source.cpp`), the Placement/world ↔ Patch/source-local transform itself is implemented and tested (`tests/world/test_placement.cpp`), and the dense v1 Patch/source geometry contract is validated by `src/world/authored_layer_source.hpp` with behavioural tests (`tests/world/test_authored_layer_source.cpp`). The live Placement lifecycle is implemented in Map (`place()` with `MapPlacementResult`, const lookup, and `set_*` mutation; see section 11) and is covered by `tests/world/test_map_placement.cpp`.
 
-Checked single-layer access `Map::value<LayerT>()` is now implemented and tested (`tests/world/test_map_value.cpp`): checked coordinate, chunk-plane resolution of authored Placements in descending `PlacementId` order (D-34), terminal fallback for the remaining in-Map cells, `Cache::fill<LayerT>()`, and exact propagation of lower-level source errors. The checked multi-layer access `Map::at()` (multi-layer residency plus Tile packing) and the non-template `ensure_resident()` remain pending. The terminal fallback contract is pinned in `src/world/layer_fallback.hpp` and is an explicit borrowed Map dependency; `value<LayerT>()` now queries it as the last step of chunk-plane resolution.
+Checked single-layer access `Map::value<LayerT>()` is now implemented and tested (`tests/world/test_map_value.cpp`): checked coordinate, chunk-plane resolution of authored Placements in descending `PlacementId` order (D-34), terminal fallback for the remaining in-Map cells, `Cache::fill<LayerT>()`, and exact propagation of lower-level source errors. Checked multi-layer access `Map::at()` is now also implemented and tested (`tests/world/test_map_at.cpp`): checked coordinate before any other work, multi-layer residency through the same chunk-plane seam in the Map template's declared layer order (not sorted by `LayerId`), per-layer precedence and space fall-through, fail-fast propagation of the exact first `MapError`, `CacheFull` propagation, invalidation on winning-Placement changes, and owned by-value `Tile` semantics. The terminal fallback contract is pinned in `src/world/layer_fallback.hpp` and is an explicit borrowed Map dependency; both `value<LayerT>()` and `at()` now query it as the last step of chunk-plane resolution.
 
 The recommended order is:
 
-1. implement checked `at()` by ensuring required layers then calling `Cache::tile()`;
-2. pin runtime/materialized override precedence once that state exists;
-3. add replacement/write-back policy only after the no-eviction path is proven;
-4. introduce `Region` only when a simulation needs it.
+1. pin runtime/materialized override precedence once that state exists (the checked single-layer `value<LayerT>()` slice and the checked multi-layer `Map::at()` are now both implemented and tested);
+2. add replacement/write-back policy only after the no-eviction path is proven;
+3. introduce `Region` only when a simulation needs it.
 
 Do not create placeholder objects merely to stand in for missing contracts.

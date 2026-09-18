@@ -2,12 +2,12 @@
 
 ## Overview
 
-The mapping system deliberately presents a simple interface to game and simulation code:
+The mapping system deliberately presents a simple interface to game and simulation code. `map.at()` returns `MapResult<tile_type>`; the snippet shows the success path:
 
 ```cpp
-auto tile = map.at(23, 14);
+const auto result = map.at(23, 14);
 
-if (tile[Fire] == 0)
+if (result && (*result)[Fire] == 0)
 {
     ...
 }
@@ -49,16 +49,16 @@ It contains:
 A tile therefore has identity through its position:
 
 ```cpp
-auto tile = map.at(23, 14);
+const auto result = map.at(23, 14);
 
-Coord position = tile.position();
+Coord position = (*result).position();
 ```
 
 A copied tile keeps that identity:
 
 ```cpp
-auto a = map.at(23, 14);
-Tile b = a;
+const auto a = map.at(23, 14);
+Tile b = *a;
 ```
 
 Both values describe the same map position and initially contain the same property values.
@@ -83,10 +83,10 @@ It should preferably be:
 - free of heap allocation;
 - free of back-pointers into `Map` or `Cache`.
 
-Returning `Tile` by value is therefore part of the intended API:
+Returning `Tile` by value is therefore part of the intended API — the checked result carries the packed `Tile` by value:
 
 ```cpp
-[[nodiscard]] Tile Map::at(Coord position) const;
+[[nodiscard]] MapResult<tile_type> Map::at(Coord position) const;
 ```
 
 not an optimisation problem to be avoided.
@@ -120,11 +120,11 @@ It does **not** cause a map lookup, cache lookup, or storage operation.
 For example:
 
 ```cpp
-auto tile = map.at(23, 14);
+const auto result = map.at(23, 14);
 
-if (tile[Fire] == 0)
+if (result && (*result)[Fire] == 0)
 {
-    fire_end(tile);
+    fire_end(*result);
 }
 ```
 
@@ -393,7 +393,7 @@ Normal game and simulation code should not inspect it.
 The caller writes:
 
 ```cpp
-auto tile = map.at(23, 14);
+const auto result = map.at(23, 14);   // MapResult<tile_type>
 ```
 
 not:
@@ -493,7 +493,7 @@ All public Map access should be checked.
 For example:
 
 ```cpp
-auto tile = map.at(23, 14);
+const auto result = map.at(23, 14);
 ```
 
 validates that `(23, 14)` belongs to the Map before performing the underlying operation.
@@ -564,8 +564,8 @@ No Map or cache operation occurs.
 So the two forms do not conflict:
 
 ```cpp
-auto tile = map.at(position); // checked world access
-auto fire = tile[Fire];       // cheap property access
+const auto result = map.at(position); // checked world access
+auto fire = (*result)[Fire];          // cheap property access (success path)
 ```
 
 ## Public versus internal concepts
@@ -621,7 +621,7 @@ A `Tile` contains:
 It is deliberately cheap to return and copy by value.
 
 ```cpp
-auto tile = map.at(x, y);
+const auto result = map.at(x, y);   // MapResult<tile_type>
 ```
 
 is the ordinary interface.

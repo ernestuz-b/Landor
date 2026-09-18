@@ -5,8 +5,8 @@ This file describes **what exists now**, not the final architecture.
 Source baseline reviewed before this update:
 
 ```text
-48d1931af8f113a0b3e5a1bbce5d918809dd8a02
-world: validate touched layer row structure
+70a1f7874f32228622bc6db671d060a9193813c7
+world: implement checked single-layer Map value access
 ```
 
 For intended architecture, read `dev-docs/DESIGN_STATE.md`,
@@ -71,11 +71,12 @@ tests/world/test_placement.cpp
 tests/world/test_map_placement.cpp
 tests/world/test_map_result.cpp
 tests/world/test_map_value.cpp
+tests/world/test_map_at.cpp
 
 tests/platform/storage/test_storage_filesystem.cpp
 ```
 
-`Tile`, `Chunk`, `Cache`, the streaming layer source reader, the authored Patch/source geometry contract, the Placement coordinate transform, the live Placement lifecycle on Map, filesystem storage, and the first checked single-layer Map access (`Map::value<LayerT>()`) now have behavioural GoogleTests. The terminal layer fallback contract and the checked Map access result contract keep their compile-time assertions in `tests/world/test_layer_fallback.cpp`, `tests/world/test_map_result.cpp` and the header tripwire, and are now additionally exercised behaviourally through `value<LayerT>()` in `tests/world/test_map_value.cpp`.
+`Tile`, `Chunk`, `Cache`, the streaming layer source reader, the authored Patch/source geometry contract, the Placement coordinate transform, the live Placement lifecycle on Map, filesystem storage, and the checked Map point access (`Map::value<LayerT>()` and `Map::at()`) now have behavioural GoogleTests. The terminal layer fallback contract and the checked Map access result contract keep their compile-time assertions in `tests/world/test_layer_fallback.cpp`, `tests/world/test_map_result.cpp` and the header tripwire, and are now additionally exercised behaviourally through `value<LayerT>()` in `tests/world/test_map_value.cpp` and `at()` in `tests/world/test_map_at.cpp`.
 
 The final test-layout rule is still to mirror `src/` under `tests/`. The newer mapping and platform-storage tests already do that; `test_area.cpp`, `test_coord.cpp`, and the all-headers tripwire still live at the test root and can be moved separately.
 
@@ -177,7 +178,7 @@ Its current header is aligned to the new Cache model:
 
 - supported Layers remain part of the Map type;
 - Cache remains layer-oriented;
-- `Map::at()` is checked world access and returns `MapResult<tile_type>` (pending implementation);
+- `Map::at()` is implemented: checked multi-layer world access returning `MapResult<tile_type>` — bounds check first, every supported layer resident in the Map template's declared layer order (fail-fast, exact first error), then Tile packing through `Cache::tile()`; the scalar overload `at(x, y)` forwards to `at(coord_type{x, y})`;
 - `Map::value<LayerT>()` is implemented: layer-specific checked access returning `MapResult<LayerT::value_type>` — bounds check first, canonical chunk residency, chunk-plane resolution (authored Placements in descending `PlacementId` order, then the terminal fallback), and installation through `Cache::fill<LayerT>()`;
 - the live Placement lifecycle is implemented: `place()` (both overloads) returns `MapPlacementResult = std::expected<PlacementId, MapPlacementError>`; unknown Patch is checked before capacity; successful creation assigns the next stable `PlacementId`, starting at 1 and increasing monotonically, never reused;
 - public lookup is const-only (`placement(PlacementId)` returns a bounded pointer, `nullptr` for unknown ids); `set_position()`, `set_rotation()`, `set_reflection()`, and `set_orientation()` return `bool`, reject unknown ids, and mutate only when the requested value actually differs from the current one;
@@ -187,7 +188,7 @@ Its current header is aligned to the new Cache model:
 
 The checked Map access result/error contract is now pinned in `src/world/map_result.hpp`: `Map::at()` returns `MapResult<tile_type>` and `Map::value<LayerT>()` returns `MapResult<LayerT::value_type>`, with `MapError = std::variant<MapErrorCode, LayerSourceError, AuthoredLayerSourceError>`. Map-local failures are `OutOfBounds` (the coordinate is outside the Map, detected before Cache/Storage work) and `CacheFull` (the bounded Cache cannot accept another spatial slot and has no eviction policy yet); source failures keep their exact lower-level domains, `LayerSourceError` and `AuthoredLayerSourceError`. `storage::Error` never surfaces directly; the layer source reader already maps Storage failures to `LayerSourceError::StorageFailed`.
 
-The single-layer checked access path is now implemented: `value<LayerT>()` ensures canonical chunk residency by resolving a complete layer plane — opening each relevant authored source once per Placement, validating it once against the Patch, reading the relevant cells through the streaming reader, and falling back for the remaining in-Map cells — and installs the plane through `Cache::fill<LayerT>()`. Authored precedence is pinned: a higher `PlacementId` has higher precedence, so a later successful placement overlays an earlier one (see `dev-docs/DESIGN_DECISIONS.md`, D-34). The checked multi-layer access `Map::at()` (multi-layer residency plus Tile packing) and the non-template `ensure_resident()` remain pending.
+The single-layer checked access path is now implemented: `value<LayerT>()` ensures canonical chunk residency by resolving a complete layer plane — opening each relevant authored source once per Placement, validating it once against the Patch, reading the relevant cells through the streaming reader, and falling back for the remaining in-Map cells — and installs the plane through `Cache::fill<LayerT>()`. Authored precedence is pinned: a higher `PlacementId` has higher precedence, so a later successful placement overlays an earlier one (see `dev-docs/DESIGN_DECISIONS.md`, D-34). The checked multi-layer access `Map::at()` is now implemented on the same seam: the bounds check happens before any Cache population, Storage read, authored-source opening or fallback call; the non-template `ensure_resident()` then walks the supported layers in the Map template's declared order (not sorted by `LayerId`), resolves only the missing ones, and fails fast, returning the exact first `MapError` unchanged; on success `Cache::tile()` packs the owned `Tile` value.
 
 ## Authored-world contracts
 
@@ -306,7 +307,6 @@ The newer tests mirror the source tree, while the older geometry tests still liv
 The following are not implemented and should not be invented as collateral work:
 
 - runtime/materialized override precedence above authored Placements (authored precedence itself is now pinned by D-34);
-- the terminal fallback call path is exercised by `value<LayerT>()`; `Map::at()` still does not query the provider;
 - cache replacement policy;
 - dirty-state representation;
 - write-back timing;
@@ -319,10 +319,9 @@ The following are not implemented and should not be invented as collateral work:
 
 A sensible next sequence from the current tree is:
 
-1. implement checked `Map::at()` by ensuring required layers and then packing through Cache (the single-layer `value<LayerT>()` slice is now implemented and tested);
-2. pin runtime/materialized override precedence once that state exists;
-3. add replacement/write-back policy only after the fixed-capacity no-eviction path is working;
-4. introduce `Region` only when a simulation needs an algorithmic working-area API;
-5. separately finish mechanical policy alignment in CMake, enum spelling, and test layout.
+1. pin runtime/materialized override precedence once that state exists (the checked single-layer `value<LayerT>()` slice and the checked multi-layer `Map::at()` are now both implemented and tested);
+2. add replacement/write-back policy only after the fixed-capacity no-eviction path is working;
+3. introduce `Region` only when a simulation needs an algorithmic working-area API;
+4. separately finish mechanical policy alignment in CMake, enum spelling, and test layout.
 
 Keep each step small and independently testable.

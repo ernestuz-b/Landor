@@ -296,7 +296,7 @@ resident Cache
 
 A Placement declines a cell — resolution then continues downward — when its Patch has no binding for the layer, the world coordinate is outside its transformed Patch, or the authored cell is ASCII space `0x20`. Runtime/materialized override sits above authored state conceptually but is not implemented.
 
-Missing canonical Cache layer Chunks are connected to that source-resolution path for `value<LayerT>()`; the same chunk-plane seam will serve `at()` when it is implemented. No storage format beyond the repository's existing contracts is used.
+Missing canonical Cache layer Chunks are connected to that source-resolution path through the same chunk-plane seam, which now serves both checked point-access paths: `value<LayerT>()` returns one resident layer value, and `at()` ensures every supported layer is resident in the Map template's declared layer order (fail-fast, returning the exact first `MapError` unchanged), then packs the complete owned `Tile` through `Cache::tile()`. Both validate that the coordinate belongs to the Map before any residency work. No storage format beyond the repository's existing contracts is used.
 
 ## 8. Simulation and mutation
 
