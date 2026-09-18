@@ -218,7 +218,7 @@ Version 1.0 uses:
 
 Metadata remains extensible; future layer-specific records are explicitly possible but not defined yet. Sparse coordinate-record data is also deferred rather than included in version 1.0.
 
-A minimal streaming reader now implements this contract in `src/world/layer_source.hpp`: bounded incremental metadata parsing, direct cell addressing, and bounded single-row cell reads through the Storage contract. Opening never loads or copies the complete source, and whole-file structural scanning is not performed. Cache/Map integration and runtime write-back are still pending.
+A minimal streaming reader now implements this contract in `src/world/layer_source.hpp`: bounded incremental metadata parsing, direct cell addressing, and bounded single-row cell reads through the Storage contract. Non-empty reads also validate that requested cell bytes contain no structural LF and that the touched row ends with LF, without scanning untouched rows. Opening never loads or copies the complete source, and whole-file structural scanning is not performed. Cache/Map integration and runtime write-back are still pending.
 
 The generic reader stays Patch-unaware. The dense v1 Patch/source geometry contract is validated by the separate bridge header `src/world/authored_layer_source.hpp`, which takes an already-parsed layout, performs no Storage I/O, and carries no source-identity semantics (no LayerId/SourceId/backend/share concerns).
 

@@ -55,6 +55,11 @@ enum class LayerSourceError : std::uint8_t
     /// Storage-reported source size.
     SizeMismatch,
 
+    /// Dense row structure is malformed in data that was actually touched:
+    /// LF appeared in a requested cell position, or the touched row's
+    /// terminator byte is not LF.
+    MalformedData,
+
     /// A requested cell or cell range lies outside the declared grid.
     OutOfRange
 };
@@ -128,10 +133,10 @@ struct LayerSourceLayout
 
 /// Maximum number of bytes one metadata read requests from storage.
 ///
-/// The metadata block may span as many bounded reads as needed; a single
-/// metadata line must fit within one of them. Because the terminator cannot
-/// be located before it is read, the final metadata read may extend slightly
-/// past the terminator, but never by more than this many bytes.
+/// The metadata block and individual metadata lines may span as many bounded
+/// reads as needed. Because the terminator cannot be located before it is read,
+/// the final metadata read may extend slightly past the terminator, but never
+/// by more than this many bytes.
 inline constexpr std::size_t layer_source_metadata_read_size = 512;
 
 
@@ -156,11 +161,11 @@ inline constexpr std::size_t layer_source_metadata_read_size = 512;
  * past it.
  *
  * Unknown metadata records are skipped without being interpreted; metadata
- * may span many bounded reads, although a single metadata line must fit in
- * one of them. Line-level format errors encountered before the terminator
- * are reported when the terminator is found; a source without any terminator
- * is diagnosed as MissingTerminator, which subsumes them. Whole-file
- * structural scanning is deliberately not part of normal opening.
+ * and individual metadata lines may span many bounded reads. Line-level
+ * format errors encountered before the terminator are reported when the
+ * terminator is found; a source without any terminator is diagnosed as
+ * MissingTerminator, which subsumes them. Whole-file structural scanning is
+ * deliberately not part of normal opening.
  */
 template<storage::StorageBackend Backend>
 [[nodiscard]] std::expected<LayerSourceLayout, LayerSourceError>
@@ -170,14 +175,17 @@ open_layer_source(const Backend& storage, storage::SourceId source);
 /**
  * Read consecutive cells from one source row into destination.
  *
- * destination.size() cells are read starting at column x of the given row,
- * with a single Storage read at the calculated direct offset. The request
- * never crosses the row terminator: x + destination.size() must not exceed
- * the declared width. Row or column outside the grid fails with
+ * destination.size() cells are read starting at column x of the given row.
+ * A non-empty request performs one bounded Storage read for that fragment,
+ * then one one-byte read of the touched row's structural LF terminator.
+ * The fragment never crosses the terminator: x + destination.size() must not
+ * exceed the declared width. Row or column outside the grid fails with
  * OutOfRange rather than clamping or wrapping.
  *
- * Returned bytes are literal: ASCII space (0x20) remains 0x20 and carries
- * no layer interpretation.
+ * A LF byte in a requested cell position, or a non-LF byte at the touched
+ * row terminator, fails with MalformedData. Empty fragments perform no
+ * Storage reads. Other returned bytes are literal: ASCII space (0x20)
+ * remains 0x20 and carries no layer interpretation.
  */
 template<storage::StorageBackend Backend>
 [[nodiscard]] std::expected<void, LayerSourceError>
@@ -819,6 +827,59 @@ read_cells(
     if (!result)
     {
         return std::unexpected(LayerSourceError::StorageFailed);
+    }
+
+    // LF is structural in v1 and can never be a cell value. Only inspect
+    // the requested fragment: normal gameplay does not scan untouched data.
+    for (const std::byte value : destination)
+    {
+        if (value == detail::k_newline)
+        {
+            return std::unexpected(LayerSourceError::MalformedData);
+        }
+    }
+
+    // Validate the structural byte for every row we actually touch without
+    // reading the rest of that row. The parsed layout normally guarantees
+    // this offset fits storage::Offset; keep the arithmetic defensive for
+    // callers that construct a LayerSourceLayout directly.
+    const std::uint64_t row_offset =
+        static_cast<std::uint64_t>(row)
+        * static_cast<std::uint64_t>(layout.row_stride);
+    const std::uint64_t max_offset =
+        static_cast<std::uint64_t>(std::numeric_limits<storage::Offset>::max());
+
+    if (row_offset > max_offset
+        || static_cast<std::uint64_t>(layout.data_offset) > max_offset - row_offset)
+    {
+        return std::unexpected(LayerSourceError::Overflow);
+    }
+
+    const std::uint64_t row_start =
+        static_cast<std::uint64_t>(layout.data_offset) + row_offset;
+
+    if (static_cast<std::uint64_t>(layout.width) > max_offset - row_start)
+    {
+        return std::unexpected(LayerSourceError::Overflow);
+    }
+
+    const auto terminator_offset = static_cast<storage::Offset>(
+        row_start + static_cast<std::uint64_t>(layout.width));
+
+    std::byte terminator {};
+    const auto terminator_result = storage.read(
+        source,
+        terminator_offset,
+        std::span<std::byte>(&terminator, 1));
+
+    if (!terminator_result)
+    {
+        return std::unexpected(LayerSourceError::StorageFailed);
+    }
+
+    if (terminator != detail::k_newline)
+    {
+        return std::unexpected(LayerSourceError::MalformedData);
     }
 
     return {};

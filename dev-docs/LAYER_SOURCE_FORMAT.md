@@ -270,7 +270,7 @@ expected_size = data_offset + data_size
 
 Normal gameplay opening can validate the metadata and compare the Storage-reported source size with `expected_size` without scanning the complete grid.
 
-When row data is actually read, the reader can also verify the encountered row terminator(s) as part of that bounded read.
+When row data is actually read, the runtime reader verifies the structure it touches: requested cell bytes may not contain LF, and the touched row's terminator byte must be LF. It does this with bounded reads and does not scan untouched rows.
 
 A separate strict/offline validator may scan the whole source and verify that:
 

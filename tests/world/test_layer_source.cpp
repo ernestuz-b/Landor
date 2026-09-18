@@ -551,14 +551,21 @@ TEST(LayerSource, ReadsBoundedRowFragment)
     const auto result = read_cells(layout, storage, k_source, /*row=*/1, /*x=*/2, destination);
 
     ASSERT_TRUE(result);
-    ASSERT_EQ(storage.requests().size(), 1u);
+    ASSERT_EQ(storage.requests().size(), 2u);
 
-    const auto& request = storage.requests().front();
+    const auto& request = storage.requests()[0];
     EXPECT_EQ(
         request.offset,
         static_cast<Offset>(
             layout.data_offset + layout.row_stride + 2u));
     EXPECT_EQ(request.size, 2u);
+
+    const auto& terminator_request = storage.requests()[1];
+    EXPECT_EQ(
+        terminator_request.offset,
+        static_cast<Offset>(
+            layout.data_offset + layout.row_stride + k_width));
+    EXPECT_EQ(terminator_request.size, 1u);
 
     EXPECT_EQ(static_cast<unsigned char>(destination[0]),
               static_cast<unsigned char>(cell_byte(2, 1)));
@@ -624,17 +631,88 @@ TEST(LayerSource, ReadEndingAtRowBoundarySucceeds)
     const auto result = read_cells(layout, storage, k_source, /*row=*/0, /*x=*/2, destination);
 
     ASSERT_TRUE(result);
-    ASSERT_EQ(storage.requests().size(), 1u);
+    ASSERT_EQ(storage.requests().size(), 2u);
 
-    const auto& request = storage.requests().front();
+    const auto& request = storage.requests()[0];
     EXPECT_EQ(
         static_cast<std::uint64_t>(request.offset) + request.size,
         static_cast<std::uint64_t>(layout.data_offset) + k_width);
+
+    const auto& terminator_request = storage.requests()[1];
+    EXPECT_EQ(
+        terminator_request.offset,
+        static_cast<Offset>(layout.data_offset + k_width));
+    EXPECT_EQ(terminator_request.size, 1u);
 
     EXPECT_EQ(static_cast<unsigned char>(destination[0]),
               static_cast<unsigned char>(cell_byte(2, 0)));
     EXPECT_EQ(static_cast<unsigned char>(destination[1]),
               static_cast<unsigned char>(cell_byte(3, 0)));
+}
+
+
+TEST(LayerSource, RejectsNewlineInTouchedCellRange)
+{
+    RecordingStorage storage;
+    std::string source = make_default_source();
+    storage.set_bytes(source);
+
+    const auto opened = open_layer_source(storage, k_source);
+    ASSERT_TRUE(opened);
+    const LayerSourceLayout layout = *opened;
+
+    // Keep the source size unchanged but put structural LF in an actual
+    // cell position. Opening intentionally does not scan the data grid.
+    const auto corrupt_offset = static_cast<std::size_t>(
+        layout.data_offset + layout.row_stride + 2u);
+    source[corrupt_offset] = '\n';
+    storage.set_bytes(source);
+    storage.clear_requests();
+
+    std::array<std::byte, 2> destination {};
+    const auto result =
+        read_cells(layout, storage, k_source, /*row=*/1, /*x=*/2, destination);
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), LayerSourceError::MalformedData);
+
+    // The malformed byte is found in the requested fragment, so there is no
+    // reason to issue the terminator read afterwards.
+    ASSERT_EQ(storage.requests().size(), 1u);
+}
+
+
+TEST(LayerSource, RejectsNonNewlineTouchedRowTerminator)
+{
+    RecordingStorage storage;
+    std::string source = make_default_source();
+    storage.set_bytes(source);
+
+    const auto opened = open_layer_source(storage, k_source);
+    ASSERT_TRUE(opened);
+    const LayerSourceLayout layout = *opened;
+
+    // Preserve total size while corrupting row 1's structural terminator.
+    const auto terminator_offset = static_cast<std::size_t>(
+        layout.data_offset + layout.row_stride + k_width);
+    source[terminator_offset] = 'X';
+    storage.set_bytes(source);
+    storage.clear_requests();
+
+    std::array<std::byte, 1> destination {};
+    const auto result =
+        read_cells(layout, storage, k_source, /*row=*/1, /*x=*/0, destination);
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), LayerSourceError::MalformedData);
+    ASSERT_EQ(storage.requests().size(), 2u);
+
+    const auto& terminator_request = storage.requests()[1];
+    EXPECT_EQ(
+        terminator_request.offset,
+        static_cast<Offset>(
+            layout.data_offset + layout.row_stride + k_width));
+    EXPECT_EQ(terminator_request.size, 1u);
 }
 
 
@@ -1101,17 +1179,17 @@ TEST(LayerSource, OpenDoesNotReadTheDataSection)
         landor::geo::layer_source_metadata_read_size);
     EXPECT_LT(storage.total_requested_bytes(), layout.source_size);
 
-    // A small row fragment then requests exactly that fragment and nothing
-    // else from the backing source.
+    // A small row fragment requests that fragment plus one byte for the
+    // touched row's structural LF terminator.
     storage.clear_requests();
 
     std::array<std::byte, 4> destination {};
     const auto read = read_cells(layout, storage, k_source, /*row=*/250, /*x=*/4, destination);
 
     ASSERT_TRUE(read);
-    ASSERT_EQ(storage.requests().size(), 1u);
+    ASSERT_EQ(storage.requests().size(), 2u);
 
-    const auto& request = storage.requests().front();
+    const auto& request = storage.requests()[0];
     EXPECT_EQ(
         request.offset,
         static_cast<Offset>(
@@ -1119,6 +1197,15 @@ TEST(LayerSource, OpenDoesNotReadTheDataSection)
             + static_cast<std::uint64_t>(250) * layout.row_stride
             + 4u));
     EXPECT_EQ(request.size, 4u);
+
+    const auto& terminator_request = storage.requests()[1];
+    EXPECT_EQ(
+        terminator_request.offset,
+        static_cast<Offset>(
+            layout.data_offset
+            + static_cast<std::uint64_t>(250) * layout.row_stride
+            + layout.width));
+    EXPECT_EQ(terminator_request.size, 1u);
 
     for (std::size_t i = 0; i < destination.size(); ++i)
     {

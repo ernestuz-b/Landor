@@ -223,7 +223,7 @@ data_offset + y * (width + 1) + x
 
 The format is intentionally extensible through future metadata records, including possible layer-specific records, but version 1.0 does not define them. Sparse coordinate-record data is deferred.
 
-A minimal streaming parser/source-reader now implements this contract in `src/world/layer_source.hpp`: it parses the bounded metadata region incrementally (no whole-file read or copy), exposes the parsed layout with direct cell addressing, and reads one bounded row fragment per cell-range request through the Storage contract.
+A minimal streaming parser/source-reader now implements this contract in `src/world/layer_source.hpp`: it parses the bounded metadata region incrementally (no whole-file read or copy), exposes the parsed layout with direct cell addressing, and reads bounded row fragments through the Storage contract. Each non-empty cell read also checks that the requested bytes contain no structural LF and performs a one-byte check of the touched row's LF terminator; untouched rows are not scanned.
 
 The generic reader deliberately stays unaware of Patch semantics. The dense v1 Patch/source geometry contract is enforced by a separate bridge header, `src/world/authored_layer_source.hpp`:
 
