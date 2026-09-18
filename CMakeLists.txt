@@ -27,6 +27,7 @@ add_executable(Landor
     src/world/map.hpp
     src/world/chunk.hpp
     src/world/cache.hpp
+    src/world/layer_source.hpp
     src/storage/storage_contract.hpp
     src/platform/storage/storage_filesystem.hpp
 )
@@ -93,6 +94,7 @@ if(LANDOR_BUILD_TESTS)
         tests/world/test_tile.cpp
         tests/world/test_chunk.cpp
         tests/world/test_cache.cpp
+        tests/world/test_layer_source.cpp
 
         # Behavioural tests mirroring src/platform/storage/.
         tests/platform/storage/test_storage_filesystem.cpp

@@ -5,8 +5,8 @@ This file describes **what exists now**, not the final architecture.
 Source baseline reviewed before this update:
 
 ```text
-5614eaa2cd0eeac6e5331dbf9391cba10a1ac32b
-docs: define dense layer source format
+4b81928db0b05ab50a5b0584c8b042f22ab4e63b
+docs: define cache-backed layer runtime
 ```
 
 For intended architecture, read `dev-docs/DESIGN_STATE.md`,
@@ -64,11 +64,12 @@ tests/test_coord.cpp
 tests/world/test_tile.cpp
 tests/world/test_chunk.cpp
 tests/world/test_cache.cpp
+tests/world/test_layer_source.cpp
 
 tests/platform/storage/test_storage_filesystem.cpp
 ```
 
-`Tile`, `Chunk`, `Cache`, and filesystem storage now have behavioural GoogleTests.
+`Tile`, `Chunk`, `Cache`, the streaming layer source reader, and filesystem storage now have behavioural GoogleTests.
 
 The final test-layout rule is still to mirror `src/` under `tests/`. The newer mapping and platform-storage tests already do that; `test_area.cpp`, `test_coord.cpp`, and the all-headers tripwire still live at the test root and can be moved separately.
 
@@ -93,6 +94,7 @@ src/world/
     tile.hpp
     chunk.hpp
     cache.hpp
+    layer_source.hpp
     patch.hpp
     placement.hpp
     patchset.hpp
@@ -173,7 +175,7 @@ Its current header is aligned to the new Cache model:
 - the Storage dependency is the build-selected `landor::storage::Storage` alias (currently `StorageFilesystem`);
 - Map no longer carries a placeholder `Generator&`; procedural/default fallback remains an intentionally undefined resolution seam until concrete requirements pin its contract.
 
-The actual Map resolution/population methods are still pending implementation. The authored dense layer source layout is now defined, but the repository has not yet implemented its parser/reader nor the full Patch/Placement resolution path into `Cache::fill()`.
+The actual Map resolution/population methods are still pending implementation. The authored dense layer source layout is now defined and has a streaming parser/reader (`src/world/layer_source.hpp`); the full Patch/Placement resolution path into `Cache::fill()` is still pending.
 
 ## Authored-world contracts
 
@@ -200,6 +202,8 @@ Version 1.0 uses:
 - direct Patch-local addressing through `data_offset + y * (width + 1) + x`.
 
 Metadata remains extensible; future layer-specific records are explicitly possible but not defined yet. Sparse coordinate-record data is also deferred rather than included in version 1.0.
+
+A minimal streaming reader now implements this contract in `src/world/layer_source.hpp`: bounded incremental metadata parsing, direct cell addressing, and bounded single-row cell reads through the Storage contract. Opening never loads or copies the complete source, and whole-file structural scanning is not performed. Cache/Map integration and runtime write-back are still pending.
 
 ### `landor::geo::Placement`
 
@@ -279,7 +283,6 @@ The newer tests mirror the source tree, while the older geometry tests still liv
 
 The following are not implemented and should not be invented as collateral work:
 
-- parser/reader for `dev-docs/LAYER_SOURCE_FORMAT.md`;
 - world/Placement coordinates to Patch-local source-coordinate transformation;
 - final Map layer precedence once `Map::resolve()` is implemented;
 - procedural/default fallback contract used by Map resolution;
@@ -294,13 +297,12 @@ The following are not implemented and should not be invented as collateral work:
 
 A sensible next sequence from the current tree is:
 
-1. implement and test the smallest parser/addressing helper for the dense version 1.0 authored layer source format;
-2. pin the procedural/default fallback contract and the Placement-to-Patch-local transform required for Map resolution;
-3. implement and test the smallest checked `Map::value<LayerT>()` → Cache residency/population slice using those explicit contracts;
-4. implement checked `Map::at()` by ensuring required layers and then packing through Cache;
-5. pin per-layer overlap/precedence behaviour with tests as `Map::resolve()` becomes real;
-6. add replacement/write-back policy only after the fixed-capacity no-eviction path is working;
-7. introduce `Region` only when a simulation needs an algorithmic working-area API;
-8. separately finish mechanical policy alignment in CMake, enum spelling, and test layout.
+1. pin the procedural/default fallback contract and the Placement-to-Patch-local transform required for Map resolution;
+2. implement and test the smallest checked `Map::value<LayerT>()` → Cache residency/population slice using those explicit contracts and the streaming layer source reader;
+3. implement checked `Map::at()` by ensuring required layers and then packing through Cache;
+4. pin per-layer overlap/precedence behaviour with tests as `Map::resolve()` becomes real;
+5. add replacement/write-back policy only after the fixed-capacity no-eviction path is working;
+6. introduce `Region` only when a simulation needs an algorithmic working-area API;
+7. separately finish mechanical policy alignment in CMake, enum spelling, and test layout.
 
 Keep each step small and independently testable.

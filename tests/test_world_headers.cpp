@@ -16,6 +16,7 @@
 #include "world/chunk.hpp"
 #include "world/coord.hpp"
 #include "world/layer.hpp"
+#include "world/layer_source.hpp"
 #include "world/map.hpp"
 #include "world/orientation.hpp"
 #include "world/patch.hpp"

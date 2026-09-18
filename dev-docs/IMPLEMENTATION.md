@@ -221,7 +221,7 @@ data_offset + y * (width + 1) + x
 
 The format is intentionally extensible through future metadata records, including possible layer-specific records, but version 1.0 does not define them. Sparse coordinate-record data is deferred.
 
-No parser/source-reader implementing this contract exists yet.
+A minimal streaming parser/source-reader now implements this contract in `src/world/layer_source.hpp`: it parses the bounded metadata region incrementally (no whole-file read or copy), exposes the parsed layout with direct cell addressing, and reads one bounded row fragment per cell-range request through the Storage contract.
 
 ## 8. Placement
 
@@ -336,7 +336,7 @@ Map request
     -> Cache::fill<LayerT>()
 ```
 
-The dense authored source-to-byte mapping is now defined by `LAYER_SOURCE_FORMAT.md`. What remains before this path can be implemented honestly is code to parse/address that source format, the world/Placement-to-Patch-local transform path, and the procedural/default fallback contract. Do not invent those inside `Map::value()` merely to make the method compile.
+The dense authored source-to-byte mapping is defined by `LAYER_SOURCE_FORMAT.md` and is implemented by the streaming reader in `src/world/layer_source.hpp`. What remains before this path can be implemented honestly is the world/Placement-to-Patch-local transform path and the procedural/default fallback contract. Do not invent those inside `Map::value()` merely to make the method compile.
 
 ### Per-layer resolution
 
@@ -454,6 +454,7 @@ Mirrored mapping tests now exist for:
 tests/world/test_tile.cpp
 tests/world/test_chunk.cpp
 tests/world/test_cache.cpp
+tests/world/test_layer_source.cpp
 ```
 
 Filesystem Storage tests live under:
@@ -491,16 +492,15 @@ Treat these as separate reviewable changes.
 
 ## 20. Next implementation slice
 
-The authored source file layout is now pinned, while its reader, coordinate transform path, and procedural/default fallback remain to be implemented or defined.
+The authored source file layout is pinned and now has a streaming parser/addressing helper (`src/world/layer_source.hpp`) with behavioural tests (`tests/world/test_layer_source.cpp`). The coordinate transform path and the procedural/default fallback still remain to be defined or implemented.
 
 The recommended order is:
 
-1. implement and test a small parser/addressing helper for dense version 1.0 layer sources;
-2. pin the procedural/default fallback contract and Placement-to-Patch-local transform needed by Map resolution;
-3. implement checked `value<LayerT>()` / residency using those explicit contracts;
-4. implement checked `at()` by ensuring required layers then calling `Cache::tile()`;
-5. pin overlap/precedence semantics with tests as source resolution becomes concrete;
-6. add replacement/write-back policy only after the no-eviction path is proven;
-7. introduce `Region` only when a simulation needs it.
+1. pin the procedural/default fallback contract and Placement-to-Patch-local transform needed by Map resolution;
+2. implement checked `value<LayerT>()` / residency on top of the streaming reader using those explicit contracts;
+3. implement checked `at()` by ensuring required layers then calling `Cache::tile()`;
+4. pin overlap/precedence semantics with tests as source resolution becomes concrete;
+5. add replacement/write-back policy only after the no-eviction path is proven;
+6. introduce `Region` only when a simulation needs it.
 
 Do not create placeholder objects merely to stand in for missing contracts.
