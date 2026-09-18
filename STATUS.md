@@ -5,8 +5,8 @@ This file describes **what exists now**, not the final architecture.
 Source baseline reviewed before this update:
 
 ```text
-50701ac9b434f823266f6163232895e96f3a4857
-world: harden streaming layer source reader
+64d7d1390cc0e4a61e6a794e64e5a09eccfe828c
+docs: pin placement transform origin
 ```
 
 For intended architecture, read `dev-docs/DESIGN_STATE.md`,
@@ -65,11 +65,12 @@ tests/world/test_tile.cpp
 tests/world/test_chunk.cpp
 tests/world/test_cache.cpp
 tests/world/test_layer_source.cpp
+tests/world/test_placement.cpp
 
 tests/platform/storage/test_storage_filesystem.cpp
 ```
 
-`Tile`, `Chunk`, `Cache`, the streaming layer source reader, and filesystem storage now have behavioural GoogleTests.
+`Tile`, `Chunk`, `Cache`, the streaming layer source reader, the Placement coordinate transform, and filesystem storage now have behavioural GoogleTests.
 
 The final test-layout rule is still to mirror `src/` under `tests/`. The newer mapping and platform-storage tests already do that; `test_area.cpp`, `test_coord.cpp`, and the all-headers tripwire still live at the test root and can be moved separately.
 
@@ -219,6 +220,8 @@ Transform order remains:
 reflection -> rotation -> translation
 ```
 
+That contract is now implemented pointwise as `local_to_world()` and `world_to_local()`, both returning `std::optional<coord_type>`. Reflection, rotation, and translation/subtraction run in a wide signed intermediate, so narrow coordinate types cannot overflow; a result that no longer fits in the coordinate type is reported as `nullopt` instead of wrapping. No `Patch` object is required, and Patch-local-area checking stays a separate `patch.local_area().contains(local)` step for Map. The anchor, the order, and the round trips over all 16 orientations are pinned by `tests/world/test_placement.cpp`.
+
 ### `landor::geo::PatchSet`
 
 An immutable composition recipe. Selection/composition policy remains separate.
@@ -287,7 +290,6 @@ The newer tests mirror the source tree, while the older geometry tests still liv
 
 The following are not implemented and should not be invented as collateral work:
 
-- implementation of the now-pinned world/Placement ↔ Patch/source-local coordinate transformation;
 - final Map layer precedence once `Map::resolve()` is implemented;
 - procedural/default fallback contract used by Map resolution;
 - cache replacement policy;
@@ -301,7 +303,7 @@ The following are not implemented and should not be invented as collateral work:
 
 A sensible next sequence from the current tree is:
 
-1. implement and test the pinned Placement/world ↔ Patch/source-local transform, and separately pin the procedural/default fallback contract required for Map resolution;
+1. pin the procedural/default fallback contract required by Map resolution; the pinned Placement/world ↔ Patch/source-local transform is already implemented and tested;
 2. implement and test the smallest checked `Map::value<LayerT>()` → Cache residency/population slice using those explicit contracts and the streaming layer source reader;
 3. implement checked `Map::at()` by ensuring required layers and then packing through Cache;
 4. pin per-layer overlap/precedence behaviour with tests as `Map::resolve()` becomes real;

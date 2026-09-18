@@ -95,6 +95,7 @@ if(LANDOR_BUILD_TESTS)
         tests/world/test_chunk.cpp
         tests/world/test_cache.cpp
         tests/world/test_layer_source.cpp
+        tests/world/test_placement.cpp
 
         # Behavioural tests mirroring src/platform/storage/.
         tests/platform/storage/test_storage_filesystem.cpp

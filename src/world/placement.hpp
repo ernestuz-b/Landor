@@ -5,6 +5,9 @@
 #include "patch.hpp"
 
 #include <cstdint>
+#include <limits>
+#include <optional>
+#include <utility>
 
 
 namespace landor::geo
@@ -68,6 +71,14 @@ using PlacementId = std::uint16_t;
  * There is no post-transform renormalisation to keep the oriented Patch on the
  * positive side of `position`; rotated/reflected local coordinates may be
  * negative relative to the anchor.
+ *
+ * That contract is implemented pointwise by `local_to_world()` and
+ * `world_to_local()`. Both perform reflection, rotation, and
+ * translation/subtraction in a wide signed intermediate, so narrow coordinate
+ * types never overflow; a result that no longer fits in the coordinate type is
+ * reported as `std::nullopt` rather than wrapped, clamped or saturated. Patch
+ * bounds checking is deliberately not part of the transform; a caller that
+ * needs it uses `patch.local_area().contains(local)` separately.
  *
  * Placement owns only its transform and identities. It does not own the Patch
  * and contains no pointers or references into map storage.
@@ -135,6 +146,73 @@ public:
 
 
     /**
+     * Transform one Patch-local coordinate into a Map/world coordinate.
+     *
+     * Implements the pinned contract exactly:
+     *
+     *     world = position + rotate(reflect(local))
+     *
+     * Reflection and rotation operate about Patch-local `(0, 0)`, so the
+     * local origin always maps exactly to `position()` and nothing is
+     * renormalised afterwards; the result may lie below `position()` on
+     * either axis. No `Patch` object is needed: this is pure geometry and
+     * does not check that `local` lies inside `patch.local_area()`.
+     *
+     * Returns nullopt when the mathematical result does not fit in
+     * `coord_type::scalar_type`; the result is never wrapped, clamped or
+     * saturated.
+     */
+    [[nodiscard]] constexpr std::optional<coord_type>
+    local_to_world(coord_type local) const noexcept
+    {
+        wide_component x = local.x();
+        wide_component y = local.y();
+
+        auto [rx, ry] = reflect_components(m_orientation.reflection, x, y);
+        auto [px, py] = rotate_components_clockwise(m_orientation.rotation, rx, ry);
+
+        const wide_component world_x = px + static_cast<wide_component>(m_position.x());
+        const wide_component world_y = py + static_cast<wide_component>(m_position.y());
+
+        if (!fits_scalar(world_x) || !fits_scalar(world_y))
+            return std::nullopt;
+
+        return coord_type(
+            static_cast<scalar_type>(world_x),
+            static_cast<scalar_type>(world_y));
+    }
+
+
+    /**
+     * Inverse of `local_to_world()`.
+     *
+     *     local = reflect(inverse_rotate(world - position))
+     *
+     * The inverse rotation (r90 undone by r270, r270 undone by r90) is undone
+     * before the reflection, which is self-inverse. Returns nullopt when the
+     * mathematical local coordinate does not fit in `coord_type`.
+     */
+    [[nodiscard]] constexpr std::optional<coord_type>
+    world_to_local(coord_type world) const noexcept
+    {
+        const wide_component x =
+            static_cast<wide_component>(world.x()) - static_cast<wide_component>(m_position.x());
+        const wide_component y =
+            static_cast<wide_component>(world.y()) - static_cast<wide_component>(m_position.y());
+
+        auto [ux, uy] = undo_rotation_components(m_orientation.rotation, x, y);
+        auto [lx, ly] = reflect_components(m_orientation.reflection, ux, uy);
+
+        if (!fits_scalar(lx) || !fits_scalar(ly))
+            return std::nullopt;
+
+        return coord_type(
+            static_cast<scalar_type>(lx),
+            static_cast<scalar_type>(ly));
+    }
+
+
+    /**
      * Move this occurrence without modifying its authored Patch.
      *
      * The owning Map must invalidate any cached spatial results affected by
@@ -188,6 +266,83 @@ public:
 
 
 private:
+    /// Scalar type of the coordinate this placement is expressed in.
+    using scalar_type = typename coord_type::scalar_type;
+
+    /// Wide signed intermediate for transform arithmetic. The supported
+    /// coordinate widths (int8_t/int16_t/int32_t) cannot overflow it, and
+    /// negating an extreme value such as the minimum scalar stays
+    /// representable in it.
+    using wide_component = std::int64_t;
+
+
+    /**
+     * Reflect a wide (x, y) pair about the local origin, using the axes
+     * documented in `orientation.hpp`.
+     *
+     * Reflection is self-inverse, so the same helper serves both transform
+     * directions.
+     */
+    [[nodiscard]] static constexpr std::pair<wide_component, wide_component>
+    reflect_components(Reflection reflection, wide_component x, wide_component y) noexcept
+    {
+        switch (reflection)
+        {
+        case Reflection::none: return {x,  y};
+        case Reflection::x:    return {x, -y};
+        case Reflection::y:    return {-x, y};
+        case Reflection::xy:   return {-x, -y};
+        }
+        return {x, y};  // unreachable — all enumerators handled above
+    }
+
+
+    /**
+     * Rotate a wide (x, y) pair clockwise about the local origin, matching
+     * the `Coord::rotate_90cw()` convention.
+     */
+    [[nodiscard]] static constexpr std::pair<wide_component, wide_component>
+    rotate_components_clockwise(Rotation rotation, wide_component x, wide_component y) noexcept
+    {
+        switch (rotation)
+        {
+        case Rotation::none: return {x,  y};
+        case Rotation::r90:  return {y, -x};
+        case Rotation::r180: return {-x, -y};
+        case Rotation::r270: return {-y, x};
+        }
+        return {x, y};  // unreachable — all enumerators handled above
+    }
+
+
+    /**
+     * Inverse of `rotate_components_clockwise()`:
+     * r90 is undone by r270 and r270 is undone by r90; r180 is self-inverse.
+     */
+    [[nodiscard]] static constexpr std::pair<wide_component, wide_component>
+    undo_rotation_components(Rotation rotation, wide_component x, wide_component y) noexcept
+    {
+        switch (rotation)
+        {
+        case Rotation::none: return {x,  y};
+        case Rotation::r90:  return {-y, x};
+        case Rotation::r180: return {-x, -y};
+        case Rotation::r270: return {y, -x};
+        }
+        return {x, y};  // unreachable — all enumerators handled above
+    }
+
+
+    /**
+     * True when a wide component still fits in the coordinate scalar type.
+     */
+    [[nodiscard]] static constexpr bool fits_scalar(wide_component value) noexcept
+    {
+        return value >= static_cast<wide_component>(std::numeric_limits<scalar_type>::min())
+            && value <= static_cast<wide_component>(std::numeric_limits<scalar_type>::max());
+    }
+
+
     PlacementId m_id;
     PatchId      m_patch;
     coord_type   m_position;

@@ -240,6 +240,8 @@ It does not point to its Patch and does not own authored data.
 
 `position` is specifically the Map coordinate of Patch-local `(0, 0)`. Reflection and rotation operate about that local origin, then translation adds `position`; the transformed bounds are not renormalised to a new top-left.
 
+The point transform is implemented on the value: `local_to_world()` and `world_to_local()` both return `std::optional<coord_type>`. Reflection, rotation, and translation/subtraction are performed in a wide signed intermediate, so narrow coordinate types cannot overflow, and a result outside the scalar range is reported as `nullopt` rather than wrapped or clamped. Transforming a coordinate does not require a `Patch`; local-area membership remains a separate `patch.local_area().contains(local)` check for Map.
+
 This keeps placements safe to store/move independently and prevents accidental lifetime coupling to a Patch object.
 
 The owning Map resolves `PatchId` through its catalogue.
@@ -340,7 +342,7 @@ Map request
     -> Cache::fill<LayerT>()
 ```
 
-The dense authored source-to-byte mapping is defined by `LAYER_SOURCE_FORMAT.md` and is implemented by the streaming reader in `src/world/layer_source.hpp`. What remains before this path can be implemented honestly is the world/Placement-to-Patch-local transform path and the procedural/default fallback contract. Do not invent those inside `Map::value()` merely to make the method compile.
+The dense authored source-to-byte mapping is defined by `LAYER_SOURCE_FORMAT.md` and is implemented by the streaming reader in `src/world/layer_source.hpp`, and the world/Placement-to-Patch-local point transform is implemented and tested in `Placement`. What remains before this path can be implemented honestly is the procedural/default fallback contract. Do not invent it inside `Map::value()` merely to make the method compile.
 
 ### Per-layer resolution
 
@@ -496,11 +498,11 @@ Treat these as separate reviewable changes.
 
 ## 20. Next implementation slice
 
-The authored source file layout and Placement transform anchor are pinned, and the source format now has a streaming parser/addressing helper (`src/world/layer_source.hpp`) with behavioural tests (`tests/world/test_layer_source.cpp`). The coordinate-transform code and the procedural/default fallback still remain to be implemented/defined.
+The authored source file layout and Placement transform anchor are pinned, the source format now has a streaming parser/addressing helper (`src/world/layer_source.hpp`) with behavioural tests (`tests/world/test_layer_source.cpp`), and the Placement/world ↔ Patch/source-local transform itself is implemented and tested (`tests/world/test_placement.cpp`). The procedural/default fallback contract still needs to be defined.
 
 The recommended order is:
 
-1. implement and test the Placement/world ↔ Patch/source-local coordinate transform using the pinned `(0, 0)` anchor contract; separately pin the procedural/default fallback contract needed by Map resolution;
+1. pin the procedural/default fallback contract needed by Map resolution (the Placement/world ↔ Patch/source-local transform is already implemented and tested);
 2. implement checked `value<LayerT>()` / residency on top of the streaming reader using those explicit contracts;
 3. implement checked `at()` by ensuring required layers then calling `Cache::tile()`;
 4. pin overlap/precedence semantics with tests as source resolution becomes concrete;
