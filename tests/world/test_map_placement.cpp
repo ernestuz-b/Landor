@@ -144,6 +144,7 @@ struct MapPlacementTest : ::testing::Test
         Area32(Coord32(0, 0), Coord32(127, 127)),
         patches,
         storage,
+        storage,
         fallback
     };
 };

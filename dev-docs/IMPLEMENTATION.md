@@ -325,10 +325,11 @@ The Cache is mutable because logically-const world reads may populate residency 
 Map borrows:
 
 - authored Patch catalogue;
-- Storage object;
+- the authored storage role (`const landor::storage::Storage&`);
+- the runtime storage role (`landor::storage::Storage&`);
 - terminal fallback provider.
 
-The Storage dependency is the build-selected `landor::storage::Storage` alias exposed by the selected platform header (currently `StorageFilesystem`); `map.hpp` includes that header directly rather than carrying a geography-local `Storage` type.
+Map carries two explicit storage roles because authored assets and runtime save-state must not be assumed to share one root or device (see `LAYER_STORAGE_MODEL.md`). Both references currently use the build-selected `landor::storage::Storage` alias exposed by the selected platform header (currently `StorageFilesystem`); `map.hpp` includes that header directly rather than carrying a geography-local `Storage` type. That shared backend type is current source reality, not a permanent requirement: if a concrete target needs heterogeneous authored/runtime backends, that is a platform-composition concern for a later slice. The authored role is borrowed as const, so Map can read authored sources but never write them; the runtime role is a mutable reference because future materialisation and write-back must be able to write it. The roles are semantic references, not a physical-separation requirement: the same Storage object may legitimately fill both roles. Both storage objects outlive the Map.
 
 The terminal fallback dependency is a `FallbackT` template parameter constrained by `LayerFallbackProvider<FallbackT, CoordT, Layers...>` from `src/world/layer_fallback.hpp`. Map stores a `const fallback_type&` and owns nothing, and exposes no public accessor for it. The provider answers one small operation:
 
@@ -391,7 +392,7 @@ Resolution operates at chunk granularity rather than point granularity: a cache 
 
 - each plane cell is first classified as a logical in-Map position or as cache padding; world coordinates are derived from `chunk.origin()` plus the local x/y in a wide signed intermediate, so cells near the coordinate limits are padding rather than wrapped coordinates; cache padding never calls the fallback, never consults authored sources, and stays value-initialized, and public checked access cannot expose it;
 - the live Placements are collected into a fixed pointer array and sorted by descending `PlacementId` (stable identity precedence, not array slot order);
-- each considered Placement is resolved against its Patch, checked for a `LayerT` binding, and inspected for coverage of the still-unresolved in-Map cells before its source is opened; the source is then opened once, validated once against the Patch, and read cell by cell through the streaming reader; a Placement whose relevant cells are all already resolved is never opened;
+- each considered Placement is resolved against its Patch, checked for a `LayerT` binding, and inspected for coverage of the still-unresolved in-Map cells before its source is opened; the source is then opened once, validated once against the Patch, and read cell by cell through the streaming reader — always through the authored storage role; a Placement whose relevant cells are all already resolved is never opened;
 - a Placement contributes to a cell only when its Patch binds `LayerT`, the world coordinate inverse-transforms into the Patch's local area, and the authored cell carries a contribution (not ASCII space `0x20`);
 - every still-unresolved in-Map cell is then answered by the terminal fallback provider.
 
@@ -399,15 +400,16 @@ The dense authored source-to-byte mapping is defined by `LAYER_SOURCE_FORMAT.md`
 
 ### Per-layer resolution
 
-The resolution order implemented for checked single-layer access is:
+The conceptual resolution order for checked access is:
 
 ```text
 resident Cache
+    -> [future runtime/materialized override]
     -> authored Placements, highest PlacementId first
     -> terminal fallback provider (procedural baseline or layer default)
 ```
 
-Authored precedence is pinned to stable Placement identity: a higher `PlacementId` has higher precedence, so a later successful placement overlays an earlier one (see `DESIGN_DECISIONS.md`, D-34). The rule follows the monotonic id, not the array-slot order a Placement happens to occupy, and resolution is per-layer: a Placement declines a cell — letting resolution continue downward — when its Patch has no binding for the layer, the world coordinate is outside its transformed Patch, or the authored cell is ASCII space `0x20`. Runtime/materialized override sits above authored state conceptually but is not implemented.
+Authored precedence is pinned to stable Placement identity: a higher `PlacementId` has higher precedence, so a later successful placement overlays an earlier one (see `DESIGN_DECISIONS.md`, D-34). The rule follows the monotonic id, not the array-slot order a Placement happens to occupy, and resolution is per-layer: a Placement declines a cell — letting resolution continue downward — when its Patch has no binding for the layer, the world coordinate is outside its transformed Patch, or the authored cell is ASCII space `0x20`. The square-bracketed step is future work: Map stores the runtime storage role but does not consult it yet, no runtime overlay resolution exists, and every authored read flows through the authored storage role only.
 
 ### Placement creation and mutation
 

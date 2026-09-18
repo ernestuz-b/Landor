@@ -274,6 +274,10 @@ The Map:
 
 - owns live Placements;
 - refers to immutable authored Patch descriptors;
+- borrows two explicit storage roles: a const authored Storage reference
+  (immutable read source) and a mutable runtime Storage reference (writable
+  persistence for future materialisation/write-back); the same Storage
+  object may fill both roles;
 - borrows a typed terminal fallback provider as the final, always-answerable
   source of per-layer resolution;
 - resolves each supported layer independently;
@@ -286,15 +290,16 @@ Overlap resolution is per-layer. A Placement that supplies no value for one laye
 
 The precedence rule belongs in Map, not in Patch, and is pinned to stable Placement identity: a higher `PlacementId` has higher authored precedence, so a later successful placement overlays an earlier one (see `DESIGN_DECISIONS.md`, D-34). The rule follows the monotonic id, not the array-slot order a Placement happens to occupy.
 
-The resolution order implemented for checked single-layer access is:
+The conceptual resolution order is:
 
 ```text
 resident Cache
+    -> [future runtime/materialized override]
     -> authored Placements, highest PlacementId first
     -> terminal fallback provider (procedural baseline or layer default)
 ```
 
-A Placement declines a cell — resolution then continues downward — when its Patch has no binding for the layer, the world coordinate is outside its transformed Patch, or the authored cell is ASCII space `0x20`. Runtime/materialized override sits above authored state conceptually but is not implemented.
+A Placement declines a cell — resolution then continues downward — when its Patch has no binding for the layer, the world coordinate is outside its transformed Patch, or the authored cell is ASCII space `0x20`. The square-bracketed step is future work: the runtime storage role is stored on Map but not yet consulted by any read or write, and existing authored resolution uses the authored storage role only.
 
 Missing canonical Cache layer Chunks are connected to that source-resolution path through the same chunk-plane seam, which now serves both checked point-access paths: `value<LayerT>()` returns one resident layer value, and `at()` ensures every supported layer is resident in the Map template's declared layer order (fail-fast, returning the exact first `MapError` unchanged), then packs the complete owned `Tile` through `Cache::tile()`. Both validate that the coordinate belongs to the Map before any residency work. No storage format beyond the repository's existing contracts is used.
 

@@ -327,6 +327,7 @@ TEST_F(MapAtTest, FallbackOnlyTileAssemblesEveryLayer)
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {},
         storage,
+        storage,
         fallback
     };
 
@@ -366,6 +367,7 @@ TEST_F(MapAtTest, OutOfBoundsIsDetectedBeforeAnyResolutionWork)
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {m_patches},
         storage,
+        storage,
         fallback
     };
 
@@ -398,6 +400,7 @@ TEST_F(MapAtTest, ExistingLayerResidencyIsReused)
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {},
         storage,
+        storage,
         fallback
     };
 
@@ -428,6 +431,7 @@ TEST_F(MapAtTest, SecondAtCallPacksFromResidentState)
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {},
         storage,
+        storage,
         fallback
     };
 
@@ -456,6 +460,7 @@ TEST_F(MapAtTest, AuthoredLayerDoesNotHideTheOther)
         1,
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {m_patches},
+        storage,
         storage,
         fallback
     };
@@ -495,6 +500,7 @@ TEST_F(MapAtTest, PerLayerPrecedenceIsResolvedIndependently)
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {m_patches},
         storage,
+        storage,
         fallback
     };
 
@@ -527,6 +533,7 @@ TEST_F(MapAtTest, SpaceCellFallsThroughPerLayer)
         1,
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {m_patches},
+        storage,
         storage,
         fallback
     };
@@ -561,6 +568,7 @@ TEST_F(MapAtTest, FailureStopsAtTheFailingLayerInDeclaredOrder)
         1,
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {m_patches},
+        storage,
         storage,
         fallback
     };
@@ -614,6 +622,7 @@ TEST_F(MapAtTest, ResidencyFollowsTheDeclaredOrderNotTheLayerIds)
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {m_patches},
         storage,
+        storage,
         fallback
     };
 
@@ -642,6 +651,7 @@ TEST_F(MapAtTest, CacheFullWhenTheSecondSpatialChunkNeedsANewSlot)
         1,
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {},
+        storage,
         storage,
         fallback
     };
@@ -675,6 +685,7 @@ TEST_F(MapAtTest, MovingTheWinningPlacementInvalidatesTheMultiLayerTile)
         1,
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {m_patches},
+        storage,
         storage,
         fallback
     };
@@ -711,6 +722,7 @@ TEST_F(MapAtTest, ReturnedTileIsAnOwnedValue)
         1,
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {},
+        storage,
         storage,
         fallback
     };

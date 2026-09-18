@@ -171,11 +171,32 @@ using MapPlacementResult =
  * Storage and alteration
  * ----------------------
  *
- * Map uses Storage to obtain non-resident authored or materialised layer data.
+ * Map borrows two explicit storage roles through its constructor:
+ *
+ *     const storage::Storage&   authored storage
+ *     storage::Storage&         runtime storage
+ *
+ * The authored role is the immutable/read source for authored layer data.
+ * Map only reads it, and the const reference keeps Map from accidentally
+ * writing authored files. The runtime role is the writable persistence for
+ * future runtime/materialised world state; materialisation and write-back
+ * must be able to write it, so it is borrowed as a mutable reference. Both
+ * objects outlive the Map, exactly like the Patch catalogue and the fallback
+ * provider.
+ *
+ * The roles are semantic references, not a physical-separation requirement:
+ * the same Storage object may legitimately fill both roles on a host or a
+ * small target. Current resolution consults the authored role only —
+ * open_layer_source() and read_cells() inside resolve_chunk<LayerT>()
+ * receive the authored reference — while the runtime role is stored but not
+ * yet consulted by any read or write. Runtime overlay resolution, runtime
+ * SourceId mapping and write-back are future work (see
+ * LAYER_STORAGE_MODEL.md).
+ *
  * Storage abstracts where those bytes physically live.
  *
  * Altered layer state belongs to the working world. Changes may eventually be
- * written back to the storage working copy, but cache eviction and write-back
+ * written back to the runtime storage, but cache eviction and write-back
  * must never change the logical answer returned by Map.
  *
  * Procedurally supplied regions may be materialised lazily when first changed.
@@ -270,8 +291,20 @@ public:
     /**
      * Construct a live Map over an authored Patch catalogue.
      *
-     * Patch descriptors, Storage and the terminal fallback provider outlive
-     * the Map. Map borrows all three and owns none of them.
+     * Patch descriptors, both storage roles and the terminal fallback
+     * provider outlive the Map. Map borrows all of them and owns none of
+     * them.
+     *
+     * The two storage roles are semantic, not physical (see the class
+     * documentation): authored_storage is the immutable/read source for
+     * authored layer data, borrowed as const so Map can never write it;
+     * runtime_storage is the writable persistence for future
+     * runtime/materialised state, borrowed as a mutable reference because
+     * materialisation and write-back must be able to write it. The same
+     * Storage object may legitimately fill both roles.
+     *
+     * Current resolution consults the authored role only; the runtime role
+     * is stored but not yet read or written.
      *
      * The fallback provider is the final source of per-layer resolution. Map
      * queries it per layer and per in-Map world coordinate and receives
@@ -284,12 +317,14 @@ public:
         MapId id,
         area_type area,
         std::span<const patch_type> patches,
-        storage::Storage& storage,
+        const storage::Storage& authored_storage,
+        storage::Storage& runtime_storage,
         const fallback_type& fallback) noexcept
         : m_id(id),
           m_area(area),
           m_patches(patches),
-          m_storage(storage),
+          m_authored_storage(authored_storage),
+          m_runtime_storage(runtime_storage),
           m_fallback(fallback)
     {
     }
@@ -684,9 +719,10 @@ private:
      * checked for a LayerT binding, and inspected for coverage of the
      * still-unresolved in-Map cells before its source is opened; the source
      * is then opened once, validated once against the Patch, and read cell by
-     * cell through the streaming reader. A Placement whose relevant cells are
-     * all already resolved is never opened, so a completely hidden lower
-     * source cannot fail the access.
+     * cell through the streaming reader — always through the authored
+     * storage role (m_authored_storage), never through the runtime role.
+     * A Placement whose relevant cells are all already resolved is never
+     * opened, so a completely hidden lower source cannot fail the access.
      *
      * A canonical Chunk can extend outside Map::area(). Those plane cells are
      * cache padding, not logical world positions: the fallback provider is
@@ -821,7 +857,7 @@ private:
 
             // The source is opened and geometry-validated once per Placement,
             // not once per cell.
-            const auto opened = open_layer_source(m_storage, binding->source);
+            const auto opened = open_layer_source(m_authored_storage, binding->source);
             if (!opened)
             {
                 return std::unexpected(opened.error());
@@ -849,7 +885,7 @@ private:
                     // are a later slice.
                     const auto read = read_cells(
                         *opened,
-                        m_storage,
+                        m_authored_storage,
                         binding->source,
                         local_y[index],
                         local_x[index],
@@ -1106,8 +1142,25 @@ private:
      */
     std::span<const patch_type> m_patches;
 
-    /* Storage owns the persistent backing data. */
-    storage::Storage& m_storage;
+    /*
+     * Authored storage: the immutable/read source for authored layer data.
+     * Map reads it through resolve_chunk<LayerT>() and never writes it, so
+     * it is borrowed as const. Borrowed; the object outlives the Map.
+     */
+    const storage::Storage& m_authored_storage;
+
+    /*
+     * Runtime storage: the writable persistence for future
+     * runtime/materialised world state. Borrowed; the object outlives the
+     * Map.
+     *
+     * Deliberately unused by resolution for now: it is stored to pin the
+     * constructor and lifetime seam required by the future runtime
+     * reader/write-back slice (LAYER_STORAGE_MODEL.md). No code path opens,
+     * reads or writes it yet, and the same Storage object may legitimately
+     * fill both roles.
+     */
+    storage::Storage& m_runtime_storage;
 
     /*
      * Terminal fallback provider: the final source of per-layer resolution,

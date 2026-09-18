@@ -303,6 +303,7 @@ TEST_F(MapValueTest, FallbackOnlyValueComesFromTheTerminalFallback)
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {},
         storage,
+        storage,
         fallback
     };
 
@@ -328,6 +329,7 @@ TEST_F(MapValueTest, SecondQueryInTheSameChunkUsesResidentState)
         1,
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {},
+        storage,
         storage,
         fallback
     };
@@ -356,6 +358,7 @@ TEST_F(MapValueTest, OutOfBoundsIsDetectedBeforeAnyResolutionWork)
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {},
         storage,
+        storage,
         fallback
     };
 
@@ -382,6 +385,7 @@ TEST_F(MapValueTest, BoundaryChunkFallsBackOnlyForLogicalMapCells)
         1,
         Area32(Coord32(0, 0), Coord32(5, 5)),
         std::span<const Patch> {},
+        storage,
         storage,
         fallback
     };
@@ -416,6 +420,7 @@ TEST_F(MapValueTest, SecondSpatialChunkFailsWhenTheCacheHasNoFreeSlot)
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {},
         storage,
+        storage,
         fallback
     };
 
@@ -444,6 +449,7 @@ TEST_F(MapValueTest, AuthoredByteOverridesTheFallback)
         1,
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {m_patches},
+        storage,
         storage,
         fallback
     };
@@ -481,6 +487,7 @@ TEST_F(MapValueTest, PatchWithoutALayerBindingLetsTheFallbackWin)
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {m_patches},
         storage,
+        storage,
         fallback
     };
 
@@ -504,6 +511,7 @@ TEST_F(MapValueTest, SpaceCellContributesNothingSoTheFallbackWins)
         1,
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {m_patches},
+        storage,
         storage,
         fallback
     };
@@ -531,6 +539,7 @@ TEST_F(MapValueTest, RotatedPlacementMapsSourceCellsToRotatedWorldCells)
         1,
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {m_patches},
+        storage,
         storage,
         fallback
     };
@@ -565,6 +574,7 @@ TEST_F(MapValueTest, LaterPlacementOverlaysTheEarlierOne)
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {m_patches},
         storage,
+        storage,
         fallback
     };
 
@@ -592,6 +602,7 @@ TEST_F(MapValueTest, HigherPlacementWithASpaceCellShowsTheLowerThrough)
         1,
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {m_patches},
+        storage,
         storage,
         fallback
     };
@@ -626,6 +637,7 @@ TEST_F(MapValueTest, MalformedDataFromTheReaderReachesTheCallerUnchanged)
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {m_patches},
         storage,
+        storage,
         fallback
     };
 
@@ -654,6 +666,7 @@ TEST_F(MapValueTest, PatchSourceGeometryMismatchReachesTheCallerUnchanged)
         1,
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {m_patches},
+        storage,
         storage,
         fallback
     };
@@ -686,6 +699,7 @@ TEST_F(MapValueTest, CompletelyHiddenLowerSourceIsNeverOpened)
         Area32(Coord32(0, 0), Coord32(0, 0)),
         std::span<const Patch> {m_patches},
         storage,
+        storage,
         fallback
     };
 
@@ -712,6 +726,7 @@ TEST_F(MapValueTest, MovingTheWinningPlacementInvalidatesTheResidentChunk)
         1,
         Area32(Coord32(0, 0), Coord32(15, 15)),
         std::span<const Patch> {m_patches},
+        storage,
         storage,
         fallback
     };

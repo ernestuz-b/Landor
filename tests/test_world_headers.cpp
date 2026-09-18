@@ -109,18 +109,20 @@ TEST(WorldHeaders, MapPlacementResultTypesMatchTheLifecycleContract)
 }
 
 
-TEST(WorldHeaders, MapConstructorBorrowsStorageAndFallback)
+TEST(WorldHeaders, MapConstructorBorrowsBothStorageRolesAndFallback)
 {
-    // Pins the Map construction seam: the constructor takes the
-    // build-selected landor::storage::Storage reference and a const-borrowed
-    // terminal fallback provider. The old constructor without the fallback
-    // is no longer the contract.
+    // Pins the Map construction seam: the constructor takes the two explicit
+    // storage roles — the const-borrowed authored Storage and the
+    // mutable-borrowed runtime Storage — plus the const-borrowed terminal
+    // fallback provider. The old single-Storage constructor is no longer the
+    // contract.
     static_assert(
         std::is_constructible_v<
             TestMap,
             landor::geo::MapId,
             TestMap::area_type,
             std::span<const TestMap::patch_type>,
+            const landor::storage::Storage&,
             landor::storage::Storage&,
             const TestMap::fallback_type&>);
     static_assert(
@@ -129,7 +131,8 @@ TEST(WorldHeaders, MapConstructorBorrowsStorageAndFallback)
             landor::geo::MapId,
             TestMap::area_type,
             std::span<const TestMap::patch_type>,
-            landor::storage::Storage&>);
+            landor::storage::Storage&,
+            const TestMap::fallback_type&>);
     SUCCEED();
 }
 

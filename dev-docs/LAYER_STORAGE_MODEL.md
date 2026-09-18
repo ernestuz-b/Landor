@@ -176,9 +176,18 @@ Runtime Storage
 
 These may happen to be the same backend or physical device on a host build, but no design may require that.
 
-The current `Map` source contract borrows one selected `Storage` object. That is not yet sufficient to express independently located authored and runtime persistence. The implementation must gain an explicit seam for the two roles rather than assuming one filesystem root.
+The `Map` source contract now borrows two explicit storage roles:
 
-The exact API shape is deferred until the runtime reader/writer slice is implemented.
+```cpp
+const storage::Storage&   authored storage
+storage::Storage&         runtime storage
+```
+
+Existing authored resolution uses the authored storage only: `open_layer_source()` and `read_cells()` inside `Map::resolve_chunk<LayerT>()` receive the authored reference, so Map never reads from or writes to the runtime role. The runtime storage reference is stored, deliberately unused by resolution, and pinned in the Map constructor/lifetime seam for the future runtime reader/write-back slice. No runtime overlay resolution, runtime SourceId mapping or write-back exists yet.
+
+Both references currently use the build-selected `storage::Storage` type. That is current source reality, not a permanent architectural prohibition against heterogeneous authored/runtime backing implementations on a concrete target.
+
+The same physical `Storage` object may fill both roles. The requirement is that Map carries distinct semantic references for the two roles, not that the objects be different.
 
 ## Same format, different lifecycle
 
