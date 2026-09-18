@@ -284,19 +284,19 @@ The Map:
 
 Overlap resolution is per-layer. A Placement that supplies no value for one layer does not hide a lower-priority contribution to that layer.
 
-The exact precedence rule belongs in Map, not in Patch.
+The precedence rule belongs in Map, not in Patch, and is pinned to stable Placement identity: a higher `PlacementId` has higher authored precedence, so a later successful placement overlays an earlier one (see `DESIGN_DECISIONS.md`, D-34). The rule follows the monotonic id, not the array-slot order a Placement happens to occupy.
 
-The intended conceptual resolution order is:
+The resolution order implemented for checked single-layer access is:
 
 ```text
-materialized/working override
-    -> highest-priority authored placement that supplies this layer
+resident Cache
+    -> authored Placements, highest PlacementId first
     -> terminal fallback provider (procedural baseline or layer default)
 ```
 
-The precise rule must be pinned by tests when implemented.
+A Placement declines a cell — resolution then continues downward — when its Patch has no binding for the layer, the world coordinate is outside its transformed Patch, or the authored cell is ASCII space `0x20`. Runtime/materialized override sits above authored state conceptually but is not implemented.
 
-The next implementation seam is to connect missing Cache layer Chunks to that source-resolution path without inventing a storage format not already defined by repository contracts.
+Missing canonical Cache layer Chunks are connected to that source-resolution path for `value<LayerT>()`; the same chunk-plane seam will serve `at()` when it is implemented. No storage format beyond the repository's existing contracts is used.
 
 ## 8. Simulation and mutation
 
@@ -585,7 +585,7 @@ Mapping-specific details belong in `MAPPING_MODEL.md` and must remain consistent
 The following remain intentionally open:
 
 - final mutation API between simulations and materialized layer state;
-- exact layer precedence/overlap semantics once `Map::resolve()` is implemented;
+- runtime/materialized override precedence above authored Placements (authored precedence itself is pinned by D-34);
 - exact source/layer/spatial-coordinate to byte-range mapping where not already defined by a concrete format;
 - Cache replacement policy;
 - dirty-state/write-back policy;

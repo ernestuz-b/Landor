@@ -1,9 +1,11 @@
 #pragma once
 
 #include "area.hpp"
+#include "authored_layer_source.hpp"
 #include "cache.hpp"
 #include "layer.hpp"
 #include "layer_fallback.hpp"
+#include "layer_source.hpp"
 #include "map_result.hpp"
 #include "orientation.hpp"
 #include "patch.hpp"
@@ -11,7 +13,9 @@
 #include "platform/storage/storage_filesystem.hpp"
 #include "tile.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cassert>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -217,10 +221,11 @@ using MapPlacementResult =
  * particular layer does not hide a lower contribution to that layer.
  *
  * The placement array preserves insertion order, but that order is not a
- * precedence rule. The precise rule for which Placement wins at a covered
- * coordinate is deliberately kept in Map and remains open until the
- * resolution path is implemented: Patch describes authored content; Map
- * decides how placed content composes.
+ * precedence rule. Authored precedence is deliberately kept in Map and is
+ * pinned to stable Placement identity: a higher PlacementId has higher
+ * precedence, so a later successful placement overlays an earlier one (see
+ * DESIGN_DECISIONS.md, D-34). Patch describes authored content; Map decides
+ * how placed content composes.
  *
  *
  * Fixed storage
@@ -269,9 +274,11 @@ public:
      * the Map. Map borrows all three and owns none of them.
      *
      * The fallback provider is the final source of per-layer resolution. Map
-     * will query it per layer and per world coordinate and receive exactly
-     * LayerT::value_type; see layer_fallback.hpp for the contract. The
-     * resolution path does not call the provider yet.
+     * queries it per layer and per in-Map world coordinate and receives
+     * exactly LayerT::value_type; see layer_fallback.hpp for the contract.
+     * value<LayerT>() reaches it as the last step of chunk-plane resolution;
+     * no runtime/materialized override sits above the authored Placements
+     * yet.
      */
     constexpr Map(
         MapId id,
@@ -347,7 +354,24 @@ public:
     template<Layer LayerT>
         requires (std::same_as<LayerT, Layers> || ...)
     [[nodiscard]] MapResult<typename LayerT::value_type>
-    value(coord_type position) const;
+    value(coord_type position) const
+    {
+        // Checked access: the bounds decision happens before any cache,
+        // source or fallback work.
+        if (!contains(position))
+        {
+            return std::unexpected(MapErrorCode::OutOfBounds);
+        }
+
+        const auto resident = ensure_resident<LayerT>(position);
+        if (!resident)
+        {
+            return std::unexpected(resident.error());
+        }
+
+        // A resident hit never touches authored sources or the fallback.
+        return m_cache.template value<LayerT>(position);
+    }
 
 
     /**
@@ -608,21 +632,250 @@ public:
 
 private:
     /**
-     * Resolve LayerT from materialized/working state, authored Placements
-     * and the borrowed terminal fallback provider, the final always-answerable
-     * source (see layer_fallback.hpp).
+     * Resolve one complete canonical layer plane for one canonical Chunk.
      *
-     * This source-resolution operation is separate from Tile presentation.
+     * This is the Map's source-resolution seam, and it operates at chunk
+     * granularity rather than point granularity: a cache miss requires a
+     * complete canonical layer plane, and a point resolver would reopen the
+     * same .layer metadata over and over.
      *
-     * Failure carries the exact lower-level error that ended resolution: a
-     * .layer parse/read failure as the exact LayerSourceError, a Patch/source
-     * geometry disagreement as the exact AuthoredLayerSourceError. The
-     * terminal fallback provider itself never fails.
+     * On success the plane receives exactly CacheChunkSide * CacheChunkSide
+     * values of LayerT in row-major plane order (x fastest). The operation
+     * performs no heap allocation.
+     *
+     * Every in-Map cell resolves through this order:
+     *
+     *     authored Placements, highest PlacementId first
+     *         -> terminal fallback provider
+     *
+     * Authored precedence follows stable Placement identity rather than
+     * array slot order: a higher PlacementId has higher precedence, so a
+     * later successful placement overlays an earlier one (D-34). A Placement
+     * contributes to a cell only when its Patch binds LayerT, the world
+     * coordinate inverse-transforms into the Patch's local area
+     * (world_to_local nullopt means "does not contribute there", not an
+     * error), and the authored cell carries a contribution (not ASCII space
+     * 0x20). Otherwise the cell stays unresolved and resolution continues
+     * downward.
+     *
+     * Each Placement considered for the Chunk is resolved against its Patch,
+     * checked for a LayerT binding, and inspected for coverage of the
+     * still-unresolved in-Map cells before its source is opened; the source
+     * is then opened once, validated once against the Patch, and read cell by
+     * cell through the streaming reader. A Placement whose relevant cells are
+     * all already resolved is never opened, so a completely hidden lower
+     * source cannot fail the access.
+     *
+     * A canonical Chunk can extend outside Map::area(). Those plane cells are
+     * cache padding, not logical world positions: the fallback provider is
+     * never queried for them, no authored source is consulted, and their
+     * values remain value-initialized. Public checked access can never expose
+     * them.
+     *
+     * World coordinates are derived from chunk.origin() plus the local x/y in
+     * a wide signed intermediate, so cells near the coordinate limits are
+     * padding rather than wrapped coordinates.
+     *
+     * Failure carries the exact lower-level error that ended resolution: the
+     * exact LayerSourceError from opening or reading one .layer source, or
+     * the exact AuthoredLayerSourceError from a Patch/source geometry
+     * disagreement. The terminal fallback provider itself never fails.
      */
     template<Layer LayerT>
         requires (std::same_as<LayerT, Layers> || ...)
-    [[nodiscard]] MapResult<typename LayerT::value_type>
-    resolve(coord_type position) const;
+    [[nodiscard]] MapResult<void>
+    resolve_chunk(
+        const typename cache_type::chunk_type& chunk,
+        std::span<typename LayerT::value_type> values) const
+    {
+        constexpr std::size_t side = CacheChunkSide;
+        constexpr std::size_t plane_cells = side * side;
+
+        // Classify each plane cell as a logical in-Map position or as cache
+        // padding. Wide signed intermediates: a cell whose world coordinate
+        // no longer fits the scalar type is padding, never a wrapped
+        // coordinate.
+        std::array<bool, plane_cells> in_map {};
+        std::array<bool, plane_cells> resolved {};
+        std::size_t unresolved = 0;
+
+        for (std::size_t y = 0; y < side; ++y)
+        {
+            for (std::size_t x = 0; x < side; ++x)
+            {
+                const auto world = chunk_cell_world(chunk, x, y);
+                if (world && m_area.contains(*world))
+                {
+                    in_map[y * side + x] = true;
+                    ++unresolved;
+                }
+            }
+        }
+
+        // Collect the live Placements into a fixed pointer array and sort the
+        // occupied prefix by descending PlacementId. The rule follows stable
+        // identity, not array slot order, and needs no dynamic container.
+        std::array<const placement_type*, MaxPlacements> ordered {};
+        std::size_t ordered_count = 0;
+        for (const auto& entry : m_placements)
+        {
+            if (entry.has_value())
+            {
+                ordered[ordered_count++] = &(*entry);
+            }
+        }
+
+        std::sort(
+            ordered.begin(),
+            ordered.begin() + ordered_count,
+            [](const placement_type* a, const placement_type* b)
+            { return a->id() > b->id(); });
+
+        std::array<bool, plane_cells> candidate {};
+        std::array<std::uint32_t, plane_cells> local_x {};
+        std::array<std::uint32_t, plane_cells> local_y {};
+        std::byte cell {};
+
+        for (std::size_t i = 0; i < ordered_count && unresolved > 0; ++i)
+        {
+            const auto* placement = ordered[i];
+
+            // Placements are created through place(), which resolves the
+            // PatchId against the immutable borrowed catalogue, so every
+            // live Placement always resolves there.
+            const auto* descriptor = patch(placement->patch());
+            assert(descriptor != nullptr);
+
+            const auto* binding = descriptor->template binding<LayerT>();
+            if (binding == nullptr)
+            {
+                continue;
+            }
+
+            // Mark the still-unresolved in-Map cells this Placement can
+            // contribute to: the world coordinate must inverse-transform
+            // into the Patch's local area.
+            candidate.fill(false);
+            bool has_candidate = false;
+
+            for (std::size_t y = 0; y < side; ++y)
+            {
+                for (std::size_t x = 0; x < side; ++x)
+                {
+                    const std::size_t index = y * side + x;
+                    if (!in_map[index] || resolved[index])
+                    {
+                        continue;
+                    }
+
+                    const auto world = chunk_cell_world(chunk, x, y);
+                    if (!world)
+                    {
+                        continue;
+                    }
+
+                    const auto local = placement->world_to_local(*world);
+                    if (!local || !descriptor->local_area().contains(*local))
+                    {
+                        continue;
+                    }
+
+                    // Dense v1 sources anchor the local area at (0, 0), so a
+                    // contained local coordinate is non-negative and converts
+                    // explicitly into the reader's unsigned cell addressing.
+                    local_x[index] = static_cast<std::uint32_t>(local->x());
+                    local_y[index] = static_cast<std::uint32_t>(local->y());
+                    candidate[index] = true;
+                    has_candidate = true;
+                }
+            }
+
+            if (!has_candidate)
+            {
+                // Completely hidden for this Chunk: the source is never
+                // opened, so a broken lower source cannot fail the access.
+                continue;
+            }
+
+            // The source is opened and geometry-validated once per Placement,
+            // not once per cell.
+            const auto opened = open_layer_source(m_storage, binding->source);
+            if (!opened)
+            {
+                return std::unexpected(opened.error());
+            }
+
+            const auto validated = validate_authored_layer_source(
+                *descriptor, *opened);
+            if (!validated)
+            {
+                return std::unexpected(validated.error());
+            }
+
+            for (std::size_t y = 0; y < side; ++y)
+            {
+                for (std::size_t x = 0; x < side; ++x)
+                {
+                    const std::size_t index = y * side + x;
+                    if (!candidate[index] || resolved[index])
+                    {
+                        continue;
+                    }
+
+                    // One-cell reads through the reader keep the touched-row
+                    // structural validation; orientation-specific bulk reads
+                    // are a later slice.
+                    const auto read = read_cells(
+                        *opened,
+                        m_storage,
+                        binding->source,
+                        local_y[index],
+                        local_x[index],
+                        std::span<std::byte>(&cell, 1));
+                    if (!read)
+                    {
+                        return std::unexpected(read.error());
+                    }
+
+                    if (has_contribution(cell))
+                    {
+                        values[index] = static_cast<
+                            typename LayerT::value_type>(
+                            std::to_integer<std::uint8_t>(cell));
+                        resolved[index] = true;
+                        --unresolved;
+                    }
+                    // A 0x20 authored cell contributes nothing; lower
+                    // Placements may still resolve this cell.
+                }
+            }
+        }
+
+        // Terminal fallback: the final, always-answerable source for every
+        // still-unresolved in-Map cell. Cache padding outside the Map is
+        // never queried and stays value-initialized.
+        for (std::size_t y = 0; y < side; ++y)
+        {
+            for (std::size_t x = 0; x < side; ++x)
+            {
+                const std::size_t index = y * side + x;
+                if (!in_map[index] || resolved[index])
+                {
+                    continue;
+                }
+
+                const auto world = chunk_cell_world(chunk, x, y);
+                assert(world.has_value());
+
+                values[index] = m_fallback.template value<LayerT>(*world);
+                resolved[index] = true;
+                --unresolved;
+            }
+        }
+
+        assert(unresolved == 0);
+        return {};
+    }
 
 
     /**
@@ -630,11 +883,13 @@ private:
      * position.
      *
      * The implementation promotes the request to CacheChunkSide-aligned
-     * Chunks and fills missing layer Chunks through resolve()/Storage.
+     * Chunks and fills missing layer Chunks through resolve_chunk()/Storage.
      *
      * Fails with MapErrorCode::CacheFull when a required chunk would need a
      * spatial slot the bounded Cache cannot provide; source resolution
      * failures surface as their exact lower-level errors.
+     *
+     * Pending: this form serves the not-yet-implemented Map::at().
      */
     [[nodiscard]] MapResult<void> ensure_resident(coord_type position) const;
 
@@ -642,12 +897,91 @@ private:
     /**
      * Ensure one layer is resident at position for value<LayerT>().
      *
-     * Fails with MapErrorCode::CacheFull or the exact lower-level source
-     * error, as above.
+     * A resident hit returns immediately without touching authored sources
+     * or the fallback. Otherwise the canonical Chunk containing position is
+     * resolved into a fixed temporary plane and installed through
+     * Cache::fill<LayerT>().
+     *
+     * Fails with MapErrorCode::CacheFull when the bounded Cache cannot accept
+     * the Chunk's spatial slot, or with the exact lower-level source error
+     * from resolve_chunk().
      */
     template<Layer LayerT>
         requires (std::same_as<LayerT, Layers> || ...)
-    [[nodiscard]] MapResult<void> ensure_resident(coord_type position) const;
+    [[nodiscard]] MapResult<void>
+    ensure_resident(coord_type position) const
+    {
+        if (m_cache.template contains<LayerT>(position))
+        {
+            return {};
+        }
+
+        const auto chunk = m_cache.template chunk_for<LayerT>(position);
+
+        std::array<
+            typename LayerT::value_type,
+            CacheChunkSide * CacheChunkSide>
+            values {};
+
+        const auto resolved = resolve_chunk<LayerT>(chunk, values);
+        if (!resolved)
+        {
+            return std::unexpected(resolved.error());
+        }
+
+        if (!m_cache.template fill<LayerT>(chunk, values))
+        {
+            return std::unexpected(MapErrorCode::CacheFull);
+        }
+
+        return {};
+    }
+
+
+    /**
+     * True when a wide coordinate component still fits in the Map's scalar
+     * type.
+     */
+    [[nodiscard]] static constexpr bool
+    fits_coord_component(std::int64_t value) noexcept
+    {
+        return value >= static_cast<std::int64_t>(
+                           std::numeric_limits<scalar_type>::min())
+            && value <= static_cast<std::int64_t>(
+                           std::numeric_limits<scalar_type>::max());
+    }
+
+
+    /**
+     * One Chunk-local plane position as a world coordinate.
+     *
+     * The origin offset is taken in a wide signed intermediate, so a plane
+     * cell near the coordinate limits is padding (nullopt) rather than a
+     * wrapped coordinate.
+     */
+    [[nodiscard]] static constexpr std::optional<coord_type>
+    chunk_cell_world(
+        const typename cache_type::chunk_type& chunk,
+        std::size_t x,
+        std::size_t y) noexcept
+    {
+        const std::int64_t wide_x =
+            static_cast<std::int64_t>(chunk.origin().x())
+            + static_cast<std::int64_t>(x);
+        const std::int64_t wide_y =
+            static_cast<std::int64_t>(chunk.origin().y())
+            + static_cast<std::int64_t>(y);
+
+        if (!fits_coord_component(wide_x) || !fits_coord_component(wide_y))
+        {
+            return std::nullopt;
+        }
+
+        return coord_type {
+            static_cast<scalar_type>(wide_x),
+            static_cast<scalar_type>(wide_y)
+        };
+    }
 
 
     /**
