@@ -302,6 +302,7 @@ The current template parameterizes:
 - maximum Placements;
 - Cache spatial-slot capacity;
 - canonical Cache chunk side;
+- terminal fallback provider type, constrained by `LayerFallbackProvider`;
 - coordinate type;
 - supported Layers.
 
@@ -322,11 +323,19 @@ The Cache is mutable because logically-const world reads may populate residency 
 Map borrows:
 
 - authored Patch catalogue;
-- Storage object.
+- Storage object;
+- terminal fallback provider.
 
 The Storage dependency is the build-selected `landor::storage::Storage` alias exposed by the selected platform header (currently `StorageFilesystem`); `map.hpp` includes that header directly rather than carrying a geography-local `Storage` type.
 
-Map does not currently borrow or store a `Generator`. Procedural/default fallback remains part of the intended per-layer resolution order, but no fallback-object API is defined yet. Introduce one only when concrete Map resolution requirements establish the useful contract.
+The terminal fallback dependency is a `FallbackT` template parameter constrained by `LayerFallbackProvider<FallbackT, CoordT, Layers...>` from `src/world/layer_fallback.hpp`. Map stores a `const fallback_type&` and owns nothing, and exposes no public accessor for it. The provider answers one small operation:
+
+```cpp
+provider.template value<LayerT>(world_position)
+    -> exactly LayerT::value_type
+```
+
+It covers procedural baseline generation or a fixed layer default behind that operation, always answers (absence is not an outcome), and must return the exact layer value type. The old vague `Generator&` placeholder is not part of the contract.
 
 ### Access
 
@@ -357,7 +366,7 @@ Map request
     -> Cache::fill<LayerT>()
 ```
 
-The dense authored source-to-byte mapping is defined by `LAYER_SOURCE_FORMAT.md` and is implemented by the streaming reader in `src/world/layer_source.hpp`, and the world/Placement-to-Patch-local point transform is implemented and tested in `Placement`. What remains before this path can be implemented honestly is the procedural/default fallback contract. Do not invent it inside `Map::value()` merely to make the method compile.
+The dense authored source-to-byte mapping is defined by `LAYER_SOURCE_FORMAT.md` and is implemented by the streaming reader in `src/world/layer_source.hpp`, and the world/Placement-to-Patch-local point transform is implemented and tested in `Placement`. The terminal fallback contract at the end of that path is pinned in `src/world/layer_fallback.hpp` and is a real borrowed Map dependency. When `Map::value()`/`resolve()` are implemented they must reach the provider through that seam, not through a reintroduced generator placeholder.
 
 ### Per-layer resolution
 
@@ -366,7 +375,7 @@ The intended conceptual ordering remains:
 ```text
 materialized/working override
     -> highest-priority authored Placement that supplies the requested layer
-    -> procedural/default source
+    -> terminal fallback provider (procedural baseline or layer default)
 ```
 
 The precise precedence rule is not yet implemented and must be pinned by tests when `Map::resolve()` becomes real.
@@ -513,15 +522,14 @@ Treat these as separate reviewable changes.
 
 ## 20. Next implementation slice
 
-The authored source file layout and Placement transform anchor are pinned, the source format now has a streaming parser/addressing helper (`src/world/layer_source.hpp`) with behavioural tests (`tests/world/test_layer_source.cpp`), the Placement/world ↔ Patch/source-local transform itself is implemented and tested (`tests/world/test_placement.cpp`), and the dense v1 Patch/source geometry contract is validated by `src/world/authored_layer_source.hpp` with behavioural tests (`tests/world/test_authored_layer_source.cpp`). Map itself does not yet perform source opening, validation, or resolution. The procedural/default fallback contract still needs to be defined.
+The authored source file layout and Placement transform anchor are pinned, the source format now has a streaming parser/addressing helper (`src/world/layer_source.hpp`) with behavioural tests (`tests/world/test_layer_source.cpp`), the Placement/world ↔ Patch/source-local transform itself is implemented and tested (`tests/world/test_placement.cpp`), and the dense v1 Patch/source geometry contract is validated by `src/world/authored_layer_source.hpp` with behavioural tests (`tests/world/test_authored_layer_source.cpp`). Map itself does not yet perform source opening, validation, or resolution. The terminal fallback contract is pinned in `src/world/layer_fallback.hpp` and is an explicit borrowed Map dependency; Map resolution does not call it yet.
 
 The recommended order is:
 
-1. pin the procedural/default fallback contract needed by Map resolution (the Placement/world ↔ Patch/source-local transform is already implemented and tested);
-2. implement checked `value<LayerT>()` / residency on top of the streaming reader using those explicit contracts;
-3. implement checked `at()` by ensuring required layers then calling `Cache::tile()`;
-4. pin overlap/precedence semantics with tests as source resolution becomes concrete;
-5. add replacement/write-back policy only after the no-eviction path is proven;
-6. introduce `Region` only when a simulation needs it.
+1. implement checked `value<LayerT>()` / residency on top of the streaming reader using those explicit contracts;
+2. implement checked `at()` by ensuring required layers then calling `Cache::tile()`;
+3. pin overlap/precedence semantics with tests as source resolution becomes concrete;
+4. add replacement/write-back policy only after the no-eviction path is proven;
+5. introduce `Region` only when a simulation needs it.
 
 Do not create placeholder objects merely to stand in for missing contracts.

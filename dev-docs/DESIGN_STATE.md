@@ -274,8 +274,10 @@ The Map:
 
 - owns live Placements;
 - refers to immutable authored Patch descriptors;
+- borrows a typed terminal fallback provider as the final, always-answerable
+  source of per-layer resolution;
 - resolves each supported layer independently;
-- combines authored, procedural/default and materialized working state;
+- combines authored, materialized/working and terminal fallback state;
 - owns/integrates a bounded layer-oriented Cache;
 - returns compact Tile values assembled from resident layer state;
 - presents checked public world access.
@@ -289,7 +291,7 @@ The intended conceptual resolution order is:
 ```text
 materialized/working override
     -> highest-priority authored placement that supplies this layer
-    -> procedural/default source
+    -> terminal fallback provider (procedural baseline or layer default)
 ```
 
 The precise rule must be pinned by tests when implemented.

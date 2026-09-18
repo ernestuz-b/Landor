@@ -286,3 +286,9 @@ The SPSC publication rules must follow the modern C++ memory model.
 **Decision:** prefer small local implementations for straightforward bounded embedded infrastructure such as logging transport.
 
 **Why:** small audited code is easier to port and reason about than introducing a large OSS dependency solely to obtain a queue/logger abstraction.
+
+## D-31 — Terminal fallback is a typed const-borrowed provider
+
+**Decision:** Map takes a `FallbackT` template parameter constrained by the `LayerFallbackProvider` concept (`src/world/layer_fallback.hpp`) and borrows one provider object as `const`, owning nothing. The provider answers `value<LayerT>(world_position) -> exactly LayerT::value_type` for every Map layer; absence is not an outcome and no `std::optional`/`std::expected` is involved. The old vague `Generator&` placeholder is not part of the contract, and the provider has no public Map accessor.
+
+**Why:** the operation Map actually needs at the end of per-layer resolution is small and total: procedural baseline generation and fixed layer defaults both reduce to "give me the untouched baseline value". Pinning that exact, always-answering shape keeps the provider ignorant of Cache, Patch, Placement and Storage, makes the value type a compile-time-checked property of the layer (no implicit conversion at the seam), and lets a build or layer mix deterministic generation and constants behind one seam.

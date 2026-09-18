@@ -28,6 +28,7 @@ add_executable(Landor
     src/world/chunk.hpp
     src/world/cache.hpp
     src/world/layer_source.hpp
+    src/world/layer_fallback.hpp
     src/world/authored_layer_source.hpp
     src/storage/storage_contract.hpp
     src/platform/storage/storage_filesystem.hpp
@@ -96,6 +97,7 @@ if(LANDOR_BUILD_TESTS)
         tests/world/test_chunk.cpp
         tests/world/test_cache.cpp
         tests/world/test_layer_source.cpp
+        tests/world/test_layer_fallback.cpp
         tests/world/test_authored_layer_source.cpp
         tests/world/test_placement.cpp
 

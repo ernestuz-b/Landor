@@ -17,6 +17,7 @@
 #include "world/chunk.hpp"
 #include "world/coord.hpp"
 #include "world/layer.hpp"
+#include "world/layer_fallback.hpp"
 #include "world/layer_source.hpp"
 #include "world/map.hpp"
 #include "world/orientation.hpp"
@@ -44,7 +45,24 @@ struct Fire
 
 static_assert(landor::geo::Layer<Fire>);
 
-using TestMap = landor::geo::Map<8, 16, 32, landor::geo::Coord32, Fire>;
+/// Constant terminal fallback provider for the test Map. It supplies the
+/// exact value type of the test layer at the Map's coordinate type, which is
+/// all the LayerFallbackFor contract asks of a provider.
+struct TestFallback
+{
+    template<typename LayerT>
+    [[nodiscard]]
+    typename LayerT::value_type
+    value(landor::geo::Coord32) const
+    {
+        return {};
+    }
+};
+
+static_assert(
+    landor::geo::LayerFallbackProvider<TestFallback, landor::geo::Coord32, Fire>);
+
+using TestMap = landor::geo::Map<8, 16, 32, TestFallback, landor::geo::Coord32, Fire>;
 
 } // namespace
 
@@ -67,19 +85,29 @@ TEST(WorldHeaders, MapAliasesAgreeWithGeometryTypes)
     static_assert(std::is_same_v<TestMap::area_type, landor::geo::Area32>);
     static_assert(std::is_same_v<TestMap::patch_type, landor::geo::Patch<>>);
     static_assert(std::is_same_v<TestMap::placement_type, landor::geo::Placement<>>);
+    static_assert(std::is_same_v<TestMap::fallback_type, TestFallback>);
     static_assert(
         std::is_same_v<TestMap::tile_type, landor::geo::Tile<landor::geo::Coord32, Fire>>);
     SUCCEED();
 }
 
 
-TEST(WorldHeaders, MapConstructorUsesSelectedStorageAlias)
+TEST(WorldHeaders, MapConstructorBorrowsStorageAndFallback)
 {
-    // Pins the Map -> Storage seam: the constructor must take the
-    // build-selected landor::storage::Storage reference, with no undefined
-    // fallback object required merely to instantiate Map.
+    // Pins the Map construction seam: the constructor takes the
+    // build-selected landor::storage::Storage reference and a const-borrowed
+    // terminal fallback provider. The old constructor without the fallback
+    // is no longer the contract.
     static_assert(
         std::is_constructible_v<
+            TestMap,
+            landor::geo::MapId,
+            TestMap::area_type,
+            std::span<const TestMap::patch_type>,
+            landor::storage::Storage&,
+            const TestMap::fallback_type&>);
+    static_assert(
+        !std::is_constructible_v<
             TestMap,
             landor::geo::MapId,
             TestMap::area_type,

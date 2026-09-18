@@ -5,8 +5,8 @@ This file describes **what exists now**, not the final architecture.
 Source baseline reviewed before this update:
 
 ```text
-0d24c9441815acc69d7121a7a6295602fa643986
-world: implement placement coordinate transforms
+30497cb5f68bace12348c47111024ab426f8ecba
+world: validate authored layer source geometry
 ```
 
 For intended architecture, read `dev-docs/DESIGN_STATE.md`,
@@ -65,13 +65,14 @@ tests/world/test_tile.cpp
 tests/world/test_chunk.cpp
 tests/world/test_cache.cpp
 tests/world/test_layer_source.cpp
+tests/world/test_layer_fallback.cpp
 tests/world/test_authored_layer_source.cpp
 tests/world/test_placement.cpp
 
 tests/platform/storage/test_storage_filesystem.cpp
 ```
 
-`Tile`, `Chunk`, `Cache`, the streaming layer source reader, the authored Patch/source geometry contract, the Placement coordinate transform, and filesystem storage now have behavioural GoogleTests.
+`Tile`, `Chunk`, `Cache`, the streaming layer source reader, the authored Patch/source geometry contract, the Placement coordinate transform, and filesystem storage now have behavioural GoogleTests. The terminal layer fallback contract is compile-time; its assertions live in `tests/world/test_layer_fallback.cpp` and the header tripwire.
 
 The final test-layout rule is still to mirror `src/` under `tests/`. The newer mapping and platform-storage tests already do that; `test_area.cpp`, `test_coord.cpp`, and the all-headers tripwire still live at the test root and can be moved separately.
 
@@ -97,6 +98,7 @@ src/world/
     chunk.hpp
     cache.hpp
     layer_source.hpp
+    layer_fallback.hpp
     authored_layer_source.hpp
     patch.hpp
     placement.hpp
@@ -176,7 +178,7 @@ Its current header is aligned to the new Cache model:
 - missing resident layers are intended to be populated through aligned Chunks;
 - placement mutation invalidates affected cached layer data;
 - the Storage dependency is the build-selected `landor::storage::Storage` alias (currently `StorageFilesystem`);
-- Map no longer carries a placeholder `Generator&`; procedural/default fallback remains an intentionally undefined resolution seam until concrete requirements pin its contract.
+- Map carries an explicit typed terminal fallback dependency: a `FallbackT` template parameter constrained by `LayerFallbackProvider<FallbackT, CoordT, Layers...>` (see `src/world/layer_fallback.hpp`). The provider is queried per layer and per world coordinate and returns exactly `LayerT::value_type`; it represents procedural baseline generation or a fixed layer default behind one small operation. Map borrows one provider object as `const` and owns it not, and exposes no accessor for it. Map resolution does not call the provider yet.
 
 The actual Map resolution/population methods are still pending implementation. The authored dense layer source layout is now defined and has a streaming parser/reader (`src/world/layer_source.hpp`) plus a pure geometry validator for the Patch/source contract (`src/world/authored_layer_source.hpp`); Map does not yet perform source opening, validation, or resolution, and the full Patch/Placement resolution path into `Cache::fill()` is still pending.
 
@@ -297,7 +299,7 @@ The newer tests mirror the source tree, while the older geometry tests still liv
 The following are not implemented and should not be invented as collateral work:
 
 - final Map layer precedence once `Map::resolve()` is implemented;
-- procedural/default fallback contract used by Map resolution;
+- the call path from Map resolution into the terminal fallback: the contract is pinned in `src/world/layer_fallback.hpp` and is a real borrowed Map dependency, but `Map::resolve()`/`value()`/`at()` do not query it yet;
 - cache replacement policy;
 - dirty-state representation;
 - write-back timing;
@@ -309,12 +311,11 @@ The following are not implemented and should not be invented as collateral work:
 
 A sensible next sequence from the current tree is:
 
-1. pin the procedural/default fallback contract required by Map resolution; the pinned Placement/world ↔ Patch/source-local transform is already implemented and tested;
-2. implement and test the smallest checked `Map::value<LayerT>()` → Cache residency/population slice using those explicit contracts and the streaming layer source reader;
-3. implement checked `Map::at()` by ensuring required layers and then packing through Cache;
-4. pin per-layer overlap/precedence behaviour with tests as `Map::resolve()` becomes real;
-5. add replacement/write-back policy only after the fixed-capacity no-eviction path is working;
-6. introduce `Region` only when a simulation needs an algorithmic working-area API;
-7. separately finish mechanical policy alignment in CMake, enum spelling, and test layout.
+1. implement and test the smallest checked `Map::value<LayerT>()` → Cache residency/population slice using the explicit contracts (including the pinned terminal fallback) and the streaming layer source reader;
+2. implement checked `Map::at()` by ensuring required layers and then packing through Cache;
+3. pin per-layer overlap/precedence behaviour with tests as `Map::resolve()` becomes real;
+4. add replacement/write-back policy only after the fixed-capacity no-eviction path is working;
+5. introduce `Region` only when a simulation needs an algorithmic working-area API;
+6. separately finish mechanical policy alignment in CMake, enum spelling, and test layout.
 
 Keep each step small and independently testable.

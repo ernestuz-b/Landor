@@ -3,6 +3,7 @@
 #include "area.hpp"
 #include "cache.hpp"
 #include "layer.hpp"
+#include "layer_fallback.hpp"
 #include "orientation.hpp"
 #include "patch.hpp"
 #include "placement.hpp"
@@ -62,8 +63,9 @@ using MapId = std::uint16_t;
  *
  * A Patch supplying no Fire layer does not mean that fire cannot exist there.
  * It only means that Patch provides no authored fire data. The Map can obtain
- * the normal fallback value, and later simulation or magic may create live
- * fire state at that coordinate.
+ * the value from its terminal fallback provider (procedural baseline
+ * generation or a fixed layer default, see layer_fallback.hpp), and later
+ * simulation or magic may create live fire state at that coordinate.
  *
  * Consequently, layer capability belongs to the game build while authored
  * layer presence belongs to each Patch.
@@ -185,8 +187,10 @@ template<
     std::size_t MaxPlacements,
     std::size_t CacheCapacity,
     std::size_t CacheChunkSide,
+    typename FallbackT,
     typename CoordT = Coord32,
     Layer... Layers>
+    requires LayerFallbackProvider<FallbackT, CoordT, Layers...>
 class Map
 {
 public:
@@ -201,26 +205,31 @@ public:
         CacheChunkSide,
         CoordT,
         Layers...>;
+    using fallback_type  = FallbackT;
 
 
     /**
      * Construct a live Map over an authored Patch catalogue.
      *
-     * Patch descriptors and Storage outlive the Map. Map owns neither.
+     * Patch descriptors, Storage and the terminal fallback provider outlive
+     * the Map. Map borrows all three and owns none of them.
      *
-     * Procedural/default fallback remains part of layer resolution, but Map
-     * does not store a generator object until that contract is defined by a
-     * concrete implementation need.
+     * The fallback provider is the final source of per-layer resolution. Map
+     * will query it per layer and per world coordinate and receive exactly
+     * LayerT::value_type; see layer_fallback.hpp for the contract. The
+     * resolution path does not call the provider yet.
      */
     constexpr Map(
         MapId id,
         area_type area,
         std::span<const patch_type> patches,
-        storage::Storage& storage) noexcept
+        storage::Storage& storage,
+        const fallback_type& fallback) noexcept
         : m_id(id),
           m_area(area),
           m_patches(patches),
-          m_storage(storage)
+          m_storage(storage),
+          m_fallback(fallback)
     {
     }
 
@@ -404,8 +413,9 @@ public:
 
 private:
     /**
-     * Resolve LayerT from authored Placements, working state and the
-     * procedural/default fallback policy once that policy is defined.
+     * Resolve LayerT from materialized/working state, authored Placements
+     * and the borrowed terminal fallback provider, the final always-answerable
+     * source (see layer_fallback.hpp).
      *
      * This source-resolution operation is separate from Tile presentation.
      */
@@ -464,6 +474,13 @@ private:
 
     /* Storage owns the persistent backing data. */
     storage::Storage& m_storage;
+
+    /*
+     * Terminal fallback provider: the final source of per-layer resolution,
+     * covering procedural baseline generation or a fixed layer default behind
+     * one small operation. Borrowed; the provider outlives the Map.
+     */
+    const fallback_type& m_fallback;
 
     /*
      * Placements are live Map state. std::optional gives us fixed-capacity
