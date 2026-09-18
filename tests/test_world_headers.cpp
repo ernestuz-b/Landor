@@ -93,6 +93,22 @@ TEST(WorldHeaders, MapAliasesAgreeWithGeometryTypes)
 }
 
 
+TEST(WorldHeaders, MapPlacementResultTypesMatchTheLifecycleContract)
+{
+    static_assert(std::is_same_v<
+        landor::geo::MapPlacementResult,
+        std::expected<landor::geo::PlacementId, landor::geo::MapPlacementError>>);
+    static_assert(std::is_same_v<
+        decltype(std::declval<const TestMap&>().placement(landor::geo::PlacementId{})),
+        const landor::geo::Placement<landor::geo::Coord32>*>);
+    static_assert(std::is_same_v<
+        decltype(std::declval<TestMap&>().set_position(landor::geo::PlacementId{},
+                                                        landor::geo::Coord32{})),
+        bool>);
+    SUCCEED();
+}
+
+
 TEST(WorldHeaders, MapConstructorBorrowsStorageAndFallback)
 {
     // Pins the Map construction seam: the constructor takes the

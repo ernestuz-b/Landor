@@ -5,8 +5,8 @@ This file describes **what exists now**, not the final architecture.
 Source baseline reviewed before this update:
 
 ```text
-7e14b2ee1b32ab167e66e2e3fc21461ad194ebe0
-world: pin terminal layer fallback contract
+3957b1eec096fadcb6aa96fe3e70cdfae0bfddb8
+world: define checked map access results
 ```
 
 For intended architecture, read `dev-docs/DESIGN_STATE.md`,
@@ -68,12 +68,13 @@ tests/world/test_layer_source.cpp
 tests/world/test_layer_fallback.cpp
 tests/world/test_authored_layer_source.cpp
 tests/world/test_placement.cpp
+tests/world/test_map_placement.cpp
 tests/world/test_map_result.cpp
 
 tests/platform/storage/test_storage_filesystem.cpp
 ```
 
-`Tile`, `Chunk`, `Cache`, the streaming layer source reader, the authored Patch/source geometry contract, the Placement coordinate transform, and filesystem storage now have behavioural GoogleTests. The terminal layer fallback contract and the checked Map access result contract are compile-time; their assertions live in `tests/world/test_layer_fallback.cpp`, `tests/world/test_map_result.cpp` and the header tripwire.
+`Tile`, `Chunk`, `Cache`, the streaming layer source reader, the authored Patch/source geometry contract, the Placement coordinate transform, the live Placement lifecycle on Map, and filesystem storage now have behavioural GoogleTests. The terminal layer fallback contract and the checked Map access result contract are compile-time; their assertions live in `tests/world/test_layer_fallback.cpp`, `tests/world/test_map_result.cpp` and the header tripwire.
 
 The final test-layout rule is still to mirror `src/` under `tests/`. The newer mapping and platform-storage tests already do that; `test_area.cpp`, `test_coord.cpp`, and the all-headers tripwire still live at the test root and can be moved separately.
 
@@ -177,8 +178,9 @@ Its current header is aligned to the new Cache model:
 - Cache remains layer-oriented;
 - `Map::at()` is checked world access and returns `MapResult<tile_type>`;
 - `Map::value<LayerT>()` remains layer-specific checked access and returns `MapResult<LayerT::value_type>`;
-- missing resident layers are intended to be populated through aligned Chunks;
-- placement mutation invalidates affected cached layer data;
+- the live Placement lifecycle is implemented: `place()` (both overloads) returns `MapPlacementResult = std::expected<PlacementId, MapPlacementError>`; unknown Patch is checked before capacity; successful creation assigns the next stable `PlacementId`, starting at 1 and increasing monotonically, never reused;
+- public lookup is const-only (`placement(PlacementId)` returns a bounded pointer, `nullptr` for unknown ids); `set_position()`, `set_rotation()`, `set_reflection()`, and `set_orientation()` return `bool`, reject unknown ids, and mutate only when the requested value actually differs from the current one;
+- any real placement change currently invalidates the whole resident Cache, because transformed Patch coverage does not exist yet (see `dev-docs/DESIGN_DECISIONS.md`, D-33);
 - the Storage dependency is the build-selected `landor::storage::Storage` alias (currently `StorageFilesystem`);
 - Map carries an explicit typed terminal fallback dependency: a `FallbackT` template parameter constrained by `LayerFallbackProvider<FallbackT, CoordT, Layers...>` (see `src/world/layer_fallback.hpp`). The provider is queried per layer and per world coordinate and returns exactly `LayerT::value_type`; it represents procedural baseline generation or a fixed layer default behind one small operation. Map borrows one provider object as `const` and owns it not, and exposes no accessor for it. Map resolution does not call the provider yet.
 
@@ -308,6 +310,7 @@ The following are not implemented and should not be invented as collateral work:
 - dirty-state representation;
 - write-back timing;
 - procedural-state materialisation policy;
+- per-Placement transformed coverage for finer Cache invalidation (current placement mutations invalidate the whole resident Cache);
 - final mutation API between simulations and live layer state;
 - `Region` ownership/view/mutation semantics.
 

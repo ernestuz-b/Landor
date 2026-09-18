@@ -261,7 +261,9 @@ This keeps placements safe to store/move independently and prevents accidental l
 
 The owning Map resolves `PatchId` through its catalogue.
 
-Although `Placement` exposes mutators on the value type, callers holding map-owned placements should receive const access; map-level mutation APIs are responsible for Cache invalidation.
+Although `Placement` exposes mutators on the value type, callers holding map-owned placements receive const access through the Map's public lookup; the map-level mutation APIs are responsible for Cache invalidation.
+
+The live lifecycle is now implemented in Map: `place()` returns `MapPlacementResult`, public `placement(PlacementId)` is const-only, and `set_position()`, `set_rotation()`, `set_reflection()`, and `set_orientation()` return `bool`, reject unknown ids, and mutate only when the requested value actually differs. See section 11 for the result contract and D-33 in `DESIGN_DECISIONS.md` for the current whole-cache invalidation policy.
 
 ## 9. Place
 
@@ -397,11 +399,16 @@ materialized/working override
 
 The precise precedence rule is not yet implemented and must be pinned by tests when `Map::resolve()` becomes real.
 
-### Placement capacity exhaustion
+### Placement creation and mutation
 
-The current header returns `std::optional<PlacementId>` from `place()`.
+`place()` (both overloads) returns `MapPlacementResult = std::expected<PlacementId, MapPlacementError>`, where `MapPlacementError` is a scoped enum with `UnknownPatch` and `CapacityFull`:
 
-Do not mechanically churn this API. When implementing placement, choose the domain result that best expresses the actual outcomes. With C++23 available, `std::expected` is preferred if a meaningful reason needs to accompany failure.
+- `UnknownPatch`: the id does not resolve in the Patch catalogue; checked before capacity, so a full Map never reports `CapacityFull` for an unknown Patch;
+- `CapacityFull`: every fixed `MaxPlacements` slot is already occupied.
+
+Successful creation assigns the next stable `PlacementId`, starting at 1 and increasing monotonically; ids are never reused. The natural overload places at the Patch's natural position with the identity orientation; the explicit overload uses the requested position and orientation.
+
+Public lookup is const-only: `placement(PlacementId)` performs a bounded search and returns `const placement_type*`, `nullptr` for unknown ids. `set_position()`, `set_rotation()`, `set_reflection()`, and `set_orientation()` return `bool`: `false` for unknown ids, `true` for known ones, and the stored Placement is modified only when the requested value differs from the current one. Any real change invalidates resident Cache data — currently the whole Cache, because transformed Patch coverage does not exist yet (D-33).
 
 ## 12. Storage contract
 
@@ -505,6 +512,7 @@ tests/world/test_layer_source.cpp
 tests/world/test_layer_fallback.cpp
 tests/world/test_authored_layer_source.cpp
 tests/world/test_placement.cpp
+tests/world/test_map_placement.cpp
 tests/world/test_map_result.cpp
 ```
 
@@ -543,7 +551,7 @@ Treat these as separate reviewable changes.
 
 ## 20. Next implementation slice
 
-The authored source file layout and Placement transform anchor are pinned, the source format now has a streaming parser/addressing helper (`src/world/layer_source.hpp`) with behavioural tests (`tests/world/test_layer_source.cpp`), the Placement/world ↔ Patch/source-local transform itself is implemented and tested (`tests/world/test_placement.cpp`), and the dense v1 Patch/source geometry contract is validated by `src/world/authored_layer_source.hpp` with behavioural tests (`tests/world/test_authored_layer_source.cpp`). Map itself does not yet perform source opening, validation, or resolution. The checked Map access result/error contract is now pinned in `src/world/map_result.hpp` (`MapResult`/`MapError`, see section 11); the access path itself is still pending. The terminal fallback contract is pinned in `src/world/layer_fallback.hpp` and is an explicit borrowed Map dependency; Map resolution does not call it yet.
+The authored source file layout and Placement transform anchor are pinned, the source format now has a streaming parser/addressing helper (`src/world/layer_source.hpp`) with behavioural tests (`tests/world/test_layer_source.cpp`), the Placement/world ↔ Patch/source-local transform itself is implemented and tested (`tests/world/test_placement.cpp`), and the dense v1 Patch/source geometry contract is validated by `src/world/authored_layer_source.hpp` with behavioural tests (`tests/world/test_authored_layer_source.cpp`). The live Placement lifecycle is now implemented in Map (`place()` with `MapPlacementResult`, const lookup, and `set_*` mutation; see section 11) and is covered by `tests/world/test_map_placement.cpp`. Map itself does not yet perform source opening, validation, or resolution. The checked Map access result/error contract is now pinned in `src/world/map_result.hpp` (`MapResult`/`MapError`, see section 11); the access path itself is still pending. The terminal fallback contract is pinned in `src/world/layer_fallback.hpp` and is an explicit borrowed Map dependency; Map resolution does not call it yet.
 
 The recommended order is:
 

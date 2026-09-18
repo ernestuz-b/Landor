@@ -15,6 +15,8 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
+#include <limits>
 #include <optional>
 #include <span>
 
@@ -23,6 +25,27 @@ namespace landor::geo
 {
 
 using MapId = std::uint16_t;
+
+
+/**
+ * Failure outcomes of Map placement management.
+ *
+ * Placement creation is a Map-management operation, not checked world
+ * access, so its failures do not share the MapError domain of
+ * map_result.hpp. There are exactly two meaningful failures:
+ *
+ *   - UnknownPatch: the PatchId is not present in this Map's catalogue;
+ *   - CapacityFull: every fixed placement slot is already occupied.
+ */
+enum class MapPlacementError : std::uint8_t
+{
+    UnknownPatch,
+    CapacityFull
+};
+
+
+using MapPlacementResult =
+    std::expected<PlacementId, MapPlacementError>;
 
 
 /**
@@ -164,8 +187,23 @@ using MapId = std::uint16_t;
  * Placements. Moving, rotating or reflecting a Placement changes only where
  * that occurrence contributes to the Map.
  *
- * Placement mutation goes through Map so affected cached layer data can be
- * invalidated/refreshed correctly.
+ * Placement creation and mutation go through Map so cached layer data can
+ * be invalidated correctly and Patch descriptors stay immutable.
+ *
+ * place() resolves the PatchId against the catalogue before allocating a
+ * slot. A natural place() puts the occurrence at Patch::natural_position()
+ * with the default Orientation; the explicit overload stores the supplied
+ * position and orientation. Successful placements receive new stable
+ * PlacementIds: they start at one, increase monotonically and are never
+ * reused (no remove-placement operation exists). Public lookup is const-only;
+ * mutable access stays private so spatial mutation cannot bypass Map.
+ *
+ * Current invalidation policy: transformed Patch coverage is not calculated
+ * yet, so a successful placement creation or an actual placement transform
+ * change invalidates the entire resident Cache (invalidate_all()). This is
+ * deliberately conservative and safe with the current Cache, which has no
+ * dirty state yet; once transformed coverage exists, Map can narrow
+ * invalidation to the affected areas.
  *
  * Story systems do not belong here. They refer to PlacementIds through
  * world-facing Place objects; Map only deals with geometry and spatial state.
@@ -174,13 +212,15 @@ using MapId = std::uint16_t;
  * Overlap
  * -------
  *
- * Placements are ordered. When several Placements cover the same coordinate,
- * resolution is performed independently for each layer. A Placement which
- * does not provide a particular layer does not hide a lower contribution to
- * that layer.
+ * When several Placements cover the same coordinate, resolution is performed
+ * independently for each layer. A Placement which does not provide a
+ * particular layer does not hide a lower contribution to that layer.
  *
- * The precise precedence rule is deliberately kept in Map rather than Patch:
- * Patch describes authored content; Map decides how placed content composes.
+ * The placement array preserves insertion order, but that order is not a
+ * precedence rule. The precise rule for which Placement wins at a covered
+ * coordinate is deliberately kept in Map and remains open until the
+ * resolution path is implemented: Patch describes authored content; Map
+ * decides how placed content composes.
  *
  *
  * Fixed storage
@@ -214,6 +254,12 @@ public:
         CoordT,
         Layers...>;
     using fallback_type  = FallbackT;
+
+
+    static_assert(
+        MaxPlacements <= std::numeric_limits<PlacementId>::max(),
+        "MaxPlacements cannot require more non-zero PlacementIds than "
+        "PlacementId can represent");
 
 
     /**
@@ -351,14 +397,24 @@ public:
     /**
      * Place a Patch at its natural authored position.
      *
-     * Map allocates and returns a stable PlacementId for the occurrence.
+     * The occurrence is created at `patch.natural_position()` with the
+     * default `Orientation{}`, delegating to the explicit overload.
      *
-     * Returns std::nullopt when every placement slot is occupied. Placement
-     * capacity is a compile-time bound, so exhaustion is a normal outcome and
-     * is reported instead of being hidden behind a reserved PlacementId.
+     * Returns MapPlacementError::UnknownPatch when the PatchId is absent
+     * from this Map's catalogue, and MapPlacementError::CapacityFull when
+     * every placement slot is occupied. UnknownPatch is checked before
+     * capacity, so an invalid PatchId is never hidden by a full Map.
      */
-    [[nodiscard]] std::optional<PlacementId>
-    place(PatchId patch);
+    [[nodiscard]] MapPlacementResult
+    place(PatchId patch_id) noexcept
+    {
+        const auto* descriptor = patch(patch_id);
+
+        if (descriptor == nullptr)
+            return std::unexpected(MapPlacementError::UnknownPatch);
+
+        return place(patch_id, descriptor->natural_position());
+    }
 
 
     /**
@@ -367,13 +423,49 @@ public:
      * This is the primitive used by PatchSet composition. Reusing an authored
      * Patch does not duplicate its layer data.
      *
-     * Returns std::nullopt when every placement slot is occupied.
+     * On success a new live Placement occupies one fixed slot and the result
+     * carries its new stable PlacementId. Map then invalidates its currently
+     * resident data under the current conservative whole-cache policy (see
+     * the class documentation).
+     *
+     * Returns MapPlacementError::UnknownPatch when the PatchId is absent
+     * from this Map's catalogue, checked before capacity so it is never
+     * hidden by a full Map, or MapPlacementError::CapacityFull when every
+     * placement slot is already occupied.
      */
-    [[nodiscard]] std::optional<PlacementId>
+    [[nodiscard]] MapPlacementResult
     place(
-        PatchId patch,
+        PatchId patch_id,
         coord_type position,
-        Orientation orientation = {});
+        Orientation orientation = {}) noexcept
+    {
+        if (patch(patch_id) == nullptr)
+            return std::unexpected(MapPlacementError::UnknownPatch);
+
+        std::optional<placement_type>* slot = nullptr;
+        for (auto& entry : m_placements)
+        {
+            if (!entry.has_value())
+            {
+                slot = &entry;
+                break;
+            }
+        }
+
+        if (slot == nullptr)
+            return std::unexpected(MapPlacementError::CapacityFull);
+
+        const PlacementId id = m_next_placement_id;
+        ++m_next_placement_id;
+        slot->emplace(id, patch_id, position, orientation);
+        ++m_placement_count;
+
+        // Current conservative policy: transformed coverage is not computed,
+        // so a new placement may affect any previously resident area.
+        invalidate_all();
+
+        return id;
+    }
 
 
     /**
@@ -383,7 +475,16 @@ public:
      * cache invalidation cannot be bypassed accidentally.
      */
     [[nodiscard]] const placement_type*
-    placement(PlacementId id) const noexcept;
+    placement(PlacementId id) const noexcept
+    {
+        for (const auto& entry : m_placements)
+        {
+            if (entry.has_value() && entry->id() == id)
+                return &(*entry);
+        }
+
+        return nullptr;
+    }
 
 
     /// Number of currently live Placements.
@@ -394,40 +495,115 @@ public:
 
 
     /**
-     * Move a Placement.
+     * Move a Placement to a new position.
      *
-     * The authored Patch remains unchanged. Map invalidates affected cached
-     * layer data for both the old and new coverage.
+     * The authored Patch remains unchanged.
+     *
+     * Returns false for an unknown PlacementId. When the requested position
+     * already equals the current position the call returns true without
+     * invalidating; an actual move mutates the Placement and invalidates
+     * resident Map data.
      */
     bool set_position(
         PlacementId id,
-        coord_type position);
+        coord_type position) noexcept
+    {
+        placement_type* target = mutable_placement(id);
+        if (target == nullptr)
+            return false;
+
+        if (target->position() == position)
+            return true;
+
+        target->set_position(position);
+        invalidate_all();
+        return true;
+    }
 
 
     /**
      * Rotate a Placement.
      *
-     * Rotation affects its contribution to every layer supplied by its Patch.
+     * Rotation affects its contribution to every layer supplied by its
+     * Patch.
+     *
+     * Returns false for an unknown PlacementId. A change to the current
+     * rotation mutates the Placement and invalidates resident Map data;
+     * requesting the rotation it already has returns true without
+     * invalidating.
      */
     bool set_rotation(
         PlacementId id,
-        Rotation rotation);
+        Rotation rotation) noexcept
+    {
+        placement_type* target = mutable_placement(id);
+        if (target == nullptr)
+            return false;
+
+        if (target->rotation() == rotation)
+            return true;
+
+        target->set_rotation(rotation);
+        invalidate_all();
+        return true;
+    }
 
 
     /**
      * Reflect a Placement.
      *
      * Reflection is applied before rotation, as defined by Orientation.
+     *
+     * Returns false for an unknown PlacementId. A change to the current
+     * reflection mutates the Placement and invalidates resident Map data;
+     * requesting the reflection it already has returns true without
+     * invalidating.
      */
     bool set_reflection(
         PlacementId id,
-        Reflection reflection);
+        Reflection reflection) noexcept
+    {
+        placement_type* target = mutable_placement(id);
+        if (target == nullptr)
+            return false;
+
+        if (target->reflection() == reflection)
+            return true;
+
+        target->set_reflection(reflection);
+        invalidate_all();
+        return true;
+    }
 
 
-    /// Replace a Placement's complete orientation.
+    /**
+     * Replace a Placement's complete orientation.
+     *
+     * Returns false for an unknown PlacementId. A change to the current
+     * orientation mutates the Placement and invalidates resident Map data;
+     * requesting the orientation it already has returns true without
+     * invalidating.
+     */
     bool set_orientation(
         PlacementId id,
-        Orientation orientation);
+        Orientation orientation) noexcept
+    {
+        placement_type* target = mutable_placement(id);
+        if (target == nullptr)
+            return false;
+
+        // Orientation equality is its two component fields, compared directly.
+        const Orientation current = target->orientation();
+        if (current.rotation == orientation.rotation
+            && current.reflection == orientation.reflection)
+        {
+            return true;
+        }
+
+        target->set_orientation(orientation);
+        invalidate_all();
+        return true;
+    }
 
 
 private:
@@ -474,26 +650,52 @@ private:
     [[nodiscard]] MapResult<void> ensure_resident(coord_type position) const;
 
 
-    /// Find a Placement for internal mutation.
+    /**
+     * Find a Placement for internal mutation.
+     *
+     * Returns nullptr for an unknown PlacementId. Mutable Placement access
+     * is never exposed publicly.
+     */
     [[nodiscard]] placement_type*
-    mutable_placement(PlacementId id) noexcept;
+    mutable_placement(PlacementId id) noexcept
+    {
+        for (auto& entry : m_placements)
+        {
+            if (entry.has_value() && entry->id() == id)
+                return &(*entry);
+        }
+
+        return nullptr;
+    }
 
 
     /// Invalidate cached layer data covering one coordinate.
-    void invalidate(coord_type position) const noexcept;
+    void invalidate(coord_type position) const noexcept
+    {
+        m_cache.invalidate(area_type {position, position});
+    }
 
 
     /// Invalidate cached layer data intersecting an area.
-    void invalidate(const area_type& area) const noexcept;
+    void invalidate(const area_type& area) const noexcept
+    {
+        m_cache.invalidate(area);
+    }
 
 
     /**
      * Invalidate all resident data.
      *
-     * Cache's dirty-state/write-back contract still applies; invalidation must
-     * never silently discard altered world state.
+     * The current Cache has no dirty state, so dropping every resident slot
+     * cannot discard altered world state. The placement lifecycle uses this
+     * conservatively today; once transformed coverage and a write-back
+     * policy exist, placement changes must invalidate only the affected
+     * areas.
      */
-    void invalidate_all() const noexcept;
+    void invalidate_all() const noexcept
+    {
+        m_cache.invalidate_all();
+    }
 
 
     MapId m_id;
