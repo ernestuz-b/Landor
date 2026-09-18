@@ -4,6 +4,7 @@
 #include "cache.hpp"
 #include "layer.hpp"
 #include "layer_fallback.hpp"
+#include "map_result.hpp"
 #include "orientation.hpp"
 #include "patch.hpp"
 #include "placement.hpp"
@@ -81,11 +82,11 @@ using MapId = std::uint16_t;
  *
  * When a caller asks:
  *
- *     Tile tile = map.at(position);
+ *     auto tile = map.at(position);
  *
- * Map ensures that the required layer data is resident, then packs the value
- * of each layer at that coordinate into a Tile. The Tile also carries its
- * coordinate as identity.
+ * and the access succeeds, Map ensures that the required layer data is
+ * resident, then packs the value of each layer at that coordinate into a
+ * Tile. The Tile also carries its coordinate as identity.
  *
  * The Tile owns those values. It contains no references into layer storage,
  * cached Chunks, Patch data or the managed heap. Copying a Tile is therefore
@@ -131,6 +132,13 @@ using MapId = std::uint16_t;
  * There is deliberately no unchecked operator[] alternative. A Map access can
  * involve cache lookup, Chunk selection and storage I/O, so avoiding a couple
  * of coordinate comparisons would provide no useful optimisation.
+ *
+ * The checked outcome is the expected-based result MapResult (see
+ * map_result.hpp): success carries the layer value or the complete Tile;
+ * failure carries the exact MapError from the seam that failed. Map-local
+ * failures are MapErrorCode::OutOfBounds and MapErrorCode::CacheFull; source
+ * failures keep their exact lower-level domains, LayerSourceError and
+ * AuthoredLayerSourceError.
  *
  *
  * Storage and alteration
@@ -283,10 +291,16 @@ public:
      * Resolution may obtain the value from resident working state, authored
      * Patch data, procedural generation or a layer default. A missing authored
      * layer is not an error.
+     *
+     * Failure carries the exact MapError from the seam that failed:
+     * MapErrorCode::OutOfBounds for a coordinate outside this Map, the exact
+     * LayerSourceError / AuthoredLayerSourceError from source resolution, or
+     * MapErrorCode::CacheFull when the bounded Cache cannot accept the
+     * required chunk.
      */
     template<Layer LayerT>
         requires (std::same_as<LayerT, Layers> || ...)
-    [[nodiscard]] typename LayerT::value_type
+    [[nodiscard]] MapResult<typename LayerT::value_type>
     value(coord_type position) const;
 
 
@@ -300,12 +314,17 @@ public:
      *
      * The returned Tile owns its values. Later cache replacement, storage
      * activity or managed-heap compaction cannot invalidate it.
+     *
+     * Failure carries the exact MapError from the seam that failed:
+     * MapErrorCode::OutOfBounds for a coordinate outside this Map,
+     * MapErrorCode::CacheFull when the bounded Cache cannot accept a required
+     * chunk, or the exact lower-level source error from resolution.
      */
-    [[nodiscard]] tile_type at(coord_type position) const;
+    [[nodiscard]] MapResult<tile_type> at(coord_type position) const;
 
 
     /** Convenience checked access from scalar coordinates. */
-    [[nodiscard]] tile_type at(scalar_type x, scalar_type y) const
+    [[nodiscard]] MapResult<tile_type> at(scalar_type x, scalar_type y) const
     {
         return at(coord_type {x, y});
     }
@@ -418,10 +437,15 @@ private:
      * source (see layer_fallback.hpp).
      *
      * This source-resolution operation is separate from Tile presentation.
+     *
+     * Failure carries the exact lower-level error that ended resolution: a
+     * .layer parse/read failure as the exact LayerSourceError, a Patch/source
+     * geometry disagreement as the exact AuthoredLayerSourceError. The
+     * terminal fallback provider itself never fails.
      */
     template<Layer LayerT>
         requires (std::same_as<LayerT, Layers> || ...)
-    [[nodiscard]] typename LayerT::value_type
+    [[nodiscard]] MapResult<typename LayerT::value_type>
     resolve(coord_type position) const;
 
 
@@ -431,14 +455,23 @@ private:
      *
      * The implementation promotes the request to CacheChunkSide-aligned
      * Chunks and fills missing layer Chunks through resolve()/Storage.
+     *
+     * Fails with MapErrorCode::CacheFull when a required chunk would need a
+     * spatial slot the bounded Cache cannot provide; source resolution
+     * failures surface as their exact lower-level errors.
      */
-    void ensure_resident(coord_type position) const;
+    [[nodiscard]] MapResult<void> ensure_resident(coord_type position) const;
 
 
-    /** Ensure one layer is resident at position for value<LayerT>(). */
+    /**
+     * Ensure one layer is resident at position for value<LayerT>().
+     *
+     * Fails with MapErrorCode::CacheFull or the exact lower-level source
+     * error, as above.
+     */
     template<Layer LayerT>
         requires (std::same_as<LayerT, Layers> || ...)
-    void ensure_resident(coord_type position) const;
+    [[nodiscard]] MapResult<void> ensure_resident(coord_type position) const;
 
 
     /// Find a Placement for internal mutation.

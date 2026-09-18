@@ -25,6 +25,7 @@ add_executable(Landor
     src/world/patchset.hpp
     src/world/place.hpp
     src/world/map.hpp
+    src/world/map_result.hpp
     src/world/chunk.hpp
     src/world/cache.hpp
     src/world/layer_source.hpp
@@ -100,6 +101,7 @@ if(LANDOR_BUILD_TESTS)
         tests/world/test_layer_fallback.cpp
         tests/world/test_authored_layer_source.cpp
         tests/world/test_placement.cpp
+        tests/world/test_map_result.cpp
 
         # Behavioural tests mirroring src/platform/storage/.
         tests/platform/storage/test_storage_filesystem.cpp

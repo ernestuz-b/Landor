@@ -20,6 +20,7 @@
 #include "world/layer_fallback.hpp"
 #include "world/layer_source.hpp"
 #include "world/map.hpp"
+#include "world/map_result.hpp"
 #include "world/orientation.hpp"
 #include "world/patch.hpp"
 #include "world/patchset.hpp"

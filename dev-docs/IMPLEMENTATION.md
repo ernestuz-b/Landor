@@ -353,6 +353,23 @@ validate position
 
 There is deliberately no public unchecked `Map::operator[]` path.
 
+The checked access contract is now expressed as an expected-based result in `src/world/map_result.hpp`:
+
+```cpp
+MapError = std::variant<MapErrorCode, LayerSourceError, AuthoredLayerSourceError>
+MapResult<T> = std::expected<T, MapError>
+```
+
+- `Map::at(position)` and `Map::at(x, y)` return `MapResult<tile_type>`;
+- `Map::value<LayerT>(position)` returns `MapResult<LayerT::value_type>`;
+- the private `resolve<LayerT>()` returns `MapResult<LayerT::value_type>` and both `ensure_resident()` forms return `MapResult<void>` (declarations only).
+
+`MapErrorCode` carries the Map-local outcomes: `OutOfBounds` (the coordinate does not belong to the Map; checked before Cache/Storage work) and `CacheFull` (the bounded Cache cannot accept another spatial slot; no eviction policy exists yet). The lower-level source errors are preserved rather than flattened: the exact `LayerSourceError` and the exact `AuthoredLayerSourceError`. `storage::Error` never appears in `MapError`; the layer source reader already maps Storage failures to `LayerSourceError::StorageFailed`.
+
+A `Placement::world_to_local()` that returns `nullopt` while testing whether a Placement contributes at one world coordinate is not a Map error: that Placement simply does not contribute there, so no transform failure belongs in `MapError`.
+
+Unsupported layer types remain compile-time errors. The signatures are declared but the access path is not implemented yet.
+
 ### Residency population
 
 The intended implementation seam is:
@@ -485,6 +502,10 @@ tests/world/test_tile.cpp
 tests/world/test_chunk.cpp
 tests/world/test_cache.cpp
 tests/world/test_layer_source.cpp
+tests/world/test_layer_fallback.cpp
+tests/world/test_authored_layer_source.cpp
+tests/world/test_placement.cpp
+tests/world/test_map_result.cpp
 ```
 
 Filesystem Storage tests live under:
@@ -522,7 +543,7 @@ Treat these as separate reviewable changes.
 
 ## 20. Next implementation slice
 
-The authored source file layout and Placement transform anchor are pinned, the source format now has a streaming parser/addressing helper (`src/world/layer_source.hpp`) with behavioural tests (`tests/world/test_layer_source.cpp`), the Placement/world ↔ Patch/source-local transform itself is implemented and tested (`tests/world/test_placement.cpp`), and the dense v1 Patch/source geometry contract is validated by `src/world/authored_layer_source.hpp` with behavioural tests (`tests/world/test_authored_layer_source.cpp`). Map itself does not yet perform source opening, validation, or resolution. The terminal fallback contract is pinned in `src/world/layer_fallback.hpp` and is an explicit borrowed Map dependency; Map resolution does not call it yet.
+The authored source file layout and Placement transform anchor are pinned, the source format now has a streaming parser/addressing helper (`src/world/layer_source.hpp`) with behavioural tests (`tests/world/test_layer_source.cpp`), the Placement/world ↔ Patch/source-local transform itself is implemented and tested (`tests/world/test_placement.cpp`), and the dense v1 Patch/source geometry contract is validated by `src/world/authored_layer_source.hpp` with behavioural tests (`tests/world/test_authored_layer_source.cpp`). Map itself does not yet perform source opening, validation, or resolution. The checked Map access result/error contract is now pinned in `src/world/map_result.hpp` (`MapResult`/`MapError`, see section 11); the access path itself is still pending. The terminal fallback contract is pinned in `src/world/layer_fallback.hpp` and is an explicit borrowed Map dependency; Map resolution does not call it yet.
 
 The recommended order is:
 

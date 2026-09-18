@@ -5,8 +5,8 @@ This file describes **what exists now**, not the final architecture.
 Source baseline reviewed before this update:
 
 ```text
-30497cb5f68bace12348c47111024ab426f8ecba
-world: validate authored layer source geometry
+7e14b2ee1b32ab167e66e2e3fc21461ad194ebe0
+world: pin terminal layer fallback contract
 ```
 
 For intended architecture, read `dev-docs/DESIGN_STATE.md`,
@@ -68,11 +68,12 @@ tests/world/test_layer_source.cpp
 tests/world/test_layer_fallback.cpp
 tests/world/test_authored_layer_source.cpp
 tests/world/test_placement.cpp
+tests/world/test_map_result.cpp
 
 tests/platform/storage/test_storage_filesystem.cpp
 ```
 
-`Tile`, `Chunk`, `Cache`, the streaming layer source reader, the authored Patch/source geometry contract, the Placement coordinate transform, and filesystem storage now have behavioural GoogleTests. The terminal layer fallback contract is compile-time; its assertions live in `tests/world/test_layer_fallback.cpp` and the header tripwire.
+`Tile`, `Chunk`, `Cache`, the streaming layer source reader, the authored Patch/source geometry contract, the Placement coordinate transform, and filesystem storage now have behavioural GoogleTests. The terminal layer fallback contract and the checked Map access result contract are compile-time; their assertions live in `tests/world/test_layer_fallback.cpp`, `tests/world/test_map_result.cpp` and the header tripwire.
 
 The final test-layout rule is still to mirror `src/` under `tests/`. The newer mapping and platform-storage tests already do that; `test_area.cpp`, `test_coord.cpp`, and the all-headers tripwire still live at the test root and can be moved separately.
 
@@ -105,6 +106,7 @@ src/world/
     patchset.hpp
     place.hpp
     map.hpp
+    map_result.hpp
 ```
 
 `src/renderers/utf-8/` exists but is not yet implemented.
@@ -173,12 +175,14 @@ Its current header is aligned to the new Cache model:
 
 - supported Layers remain part of the Map type;
 - Cache remains layer-oriented;
-- `Map::at()` is checked world access and returns `Tile<CoordT, Layers...>` by value;
-- `Map::value<LayerT>()` remains layer-specific checked access;
+- `Map::at()` is checked world access and returns `MapResult<tile_type>`;
+- `Map::value<LayerT>()` remains layer-specific checked access and returns `MapResult<LayerT::value_type>`;
 - missing resident layers are intended to be populated through aligned Chunks;
 - placement mutation invalidates affected cached layer data;
 - the Storage dependency is the build-selected `landor::storage::Storage` alias (currently `StorageFilesystem`);
 - Map carries an explicit typed terminal fallback dependency: a `FallbackT` template parameter constrained by `LayerFallbackProvider<FallbackT, CoordT, Layers...>` (see `src/world/layer_fallback.hpp`). The provider is queried per layer and per world coordinate and returns exactly `LayerT::value_type`; it represents procedural baseline generation or a fixed layer default behind one small operation. Map borrows one provider object as `const` and owns it not, and exposes no accessor for it. Map resolution does not call the provider yet.
+
+The checked Map access result/error contract is now pinned in `src/world/map_result.hpp`: `Map::at()` returns `MapResult<tile_type>` and `Map::value<LayerT>()` returns `MapResult<LayerT::value_type>`, with `MapError = std::variant<MapErrorCode, LayerSourceError, AuthoredLayerSourceError>`. Map-local failures are `OutOfBounds` (the coordinate is outside the Map, detected before Cache/Storage work) and `CacheFull` (the bounded Cache cannot accept another spatial slot and has no eviction policy yet); source failures keep their exact lower-level domains, `LayerSourceError` and `AuthoredLayerSourceError`. `storage::Error` never surfaces directly; the layer source reader already maps Storage failures to `LayerSourceError::StorageFailed`.
 
 The actual Map resolution/population methods are still pending implementation. The authored dense layer source layout is now defined and has a streaming parser/reader (`src/world/layer_source.hpp`) plus a pure geometry validator for the Patch/source contract (`src/world/authored_layer_source.hpp`); Map does not yet perform source opening, validation, or resolution, and the full Patch/Placement resolution path into `Cache::fill()` is still pending.
 

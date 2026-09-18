@@ -5,7 +5,7 @@
 The mapping system deliberately presents a simple interface to game and simulation code:
 
 ```cpp
-Tile tile = map.at(23, 14);
+auto tile = map.at(23, 14);
 
 if (tile[Fire] == 0)
 {
@@ -49,7 +49,7 @@ It contains:
 A tile therefore has identity through its position:
 
 ```cpp
-Tile tile = map.at(23, 14);
+auto tile = map.at(23, 14);
 
 Coord position = tile.position();
 ```
@@ -57,7 +57,7 @@ Coord position = tile.position();
 A copied tile keeps that identity:
 
 ```cpp
-Tile a = map.at(23, 14);
+auto a = map.at(23, 14);
 Tile b = a;
 ```
 
@@ -120,7 +120,7 @@ It does **not** cause a map lookup, cache lookup, or storage operation.
 For example:
 
 ```cpp
-Tile tile = map.at(23, 14);
+auto tile = map.at(23, 14);
 
 if (tile[Fire] == 0)
 {
@@ -393,13 +393,13 @@ Normal game and simulation code should not inspect it.
 The caller writes:
 
 ```cpp
-Tile tile = map.at(23, 14);
+auto tile = map.at(23, 14);
 ```
 
 not:
 
 ```cpp
-Tile tile = cache.at(23, 14);
+auto tile = cache.at(23, 14);
 ```
 
 `Map::at()` hides whether the requested tile:
@@ -493,10 +493,12 @@ All public Map access should be checked.
 For example:
 
 ```cpp
-Tile tile = map.at(23, 14);
+auto tile = map.at(23, 14);
 ```
 
 validates that `(23, 14)` belongs to the Map before performing the underlying operation.
+
+The checked outcome is an expected-based result: `at()` and `value<LayerT>()` return `MapResult<T>` (`src/world/map_result.hpp`), whose `MapError` carries the Map-local outcomes `OutOfBounds` and `CacheFull` plus the preserved lower-level `LayerSourceError` and `AuthoredLayerSourceError`.
 
 There is little value in exposing a separate unchecked public access path.
 
@@ -562,7 +564,7 @@ No Map or cache operation occurs.
 So the two forms do not conflict:
 
 ```cpp
-Tile tile = map.at(position); // checked world access
+auto tile = map.at(position); // checked world access
 auto fire = tile[Fire];       // cheap property access
 ```
 
@@ -619,7 +621,7 @@ A `Tile` contains:
 It is deliberately cheap to return and copy by value.
 
 ```cpp
-Tile tile = map.at(x, y);
+auto tile = map.at(x, y);
 ```
 
 is the ordinary interface.

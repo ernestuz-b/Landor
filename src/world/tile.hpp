@@ -60,7 +60,7 @@ consteval std::size_t layer_index() noexcept
  *
  *     inline constexpr FireLayer Fire {};
  *
- *     Tile tile = map.at(position);
+ *     auto tile = map.at(position);
  *     if (tile[Fire] == 0) { ... }
  */
 template<typename CoordT, Layer... Layers>
