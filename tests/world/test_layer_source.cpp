@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <initializer_list>
+#include <limits>
 #include <span>
 #include <string>
 #include <utility>
@@ -421,6 +422,79 @@ TEST(LayerSource, SkipsUnknownMetadataLines)
 }
 
 
+TEST(LayerSource, OpensUnknownRecordLargerThanManyReadBlocks)
+{
+    // A single unknown metadata record far larger than one bounded Storage
+    // read. It must be streamed and skipped without being buffered, so its
+    // length is not limited by the read-block size.
+    const std::string header =
+        "V:1.0\nD:4 3\nP:0 0\n"
+        + std::string("Z:")
+        + std::string(4096, 'a')
+        + "\n\n";
+
+    RecordingStorage storage;
+    storage.set_bytes(header + make_grid(k_width, k_height));
+
+    const auto result = open_layer_source(storage, k_source);
+
+    ASSERT_TRUE(result);
+    const auto& layout = *result;
+    EXPECT_EQ(layout.width, k_width);
+    EXPECT_EQ(layout.height, k_height);
+    EXPECT_EQ(layout.data_offset, static_cast<Offset>(header.size()));
+
+    // The long record was skipped without being retained: every read still
+    // starts inside the metadata region, and the final bounded read extends
+    // past the terminator by at most one parser block.
+    for (const auto& request : storage.requests())
+    {
+        EXPECT_LT(request.offset, layout.data_offset);
+    }
+    EXPECT_GE(storage.total_requested_bytes(), layout.data_offset);
+    EXPECT_LE(
+        storage.total_requested_bytes() - layout.data_offset,
+        landor::geo::layer_source_metadata_read_size);
+}
+
+
+TEST(LayerSource, OpensUnknownRecordWhoseKeySpansReadBlocks)
+{
+    // An unknown record whose first byte is the last byte of the first
+    // bounded read block (offset 511) and whose second byte is the first
+    // byte of the next block: the line-classification state must survive a
+    // block boundary.
+    //
+    // "V:1.0\nD:4 3\nP:0 0\n" occupies offsets 0..17. One padding line
+    // fills offsets 18..510 so the special line starts at offset 511.
+    std::string header;
+    header += "V:1.0\n";
+    header += "D:4 3\n";
+    header += "P:0 0\n";
+    header += "A:";
+    header += std::string(511 - 18 - 3, 'b');  // "A:" + payload + '\n'
+    header += '\n';
+
+    // 'V' at offset 511, 'X' at offset 512: a two-character key that is
+    // NOT the known 'V' record, split across two read blocks.
+    header += "VX:";
+    header += std::string(300, 'c');
+    header += "\n\n";
+
+    ASSERT_EQ(header.find("VX:"), 511u);
+
+    RecordingStorage storage;
+    storage.set_bytes(header + make_grid(k_width, k_height));
+
+    const auto result = open_layer_source(storage, k_source);
+
+    ASSERT_TRUE(result);
+    EXPECT_EQ((*result).width, k_width);
+    EXPECT_EQ((*result).height, k_height);
+    EXPECT_EQ((*result).data_offset, static_cast<Offset>(header.size()));
+}
+
+
 TEST(LayerSource, ReportsFirstCellOffset)
 {
     RecordingStorage storage;
@@ -604,6 +678,69 @@ TEST(LayerSource, RejectsOutOfRangeCellReads)
 }
 
 
+TEST(LayerSource, ReadCellRangeBoundariesAreExact)
+{
+    RecordingStorage storage;
+    LayerSourceLayout layout {};
+
+    ASSERT_TRUE(open_default(storage, layout));
+
+    // The last single cell of the row is the maximal valid fragment...
+    std::array<std::byte, 1> one {};
+    EXPECT_TRUE(
+        read_cells(layout, storage, k_source, /*row=*/0, /*x=*/k_width - 1u, one));
+
+    // ...but extending one cell past it would cross the row LF.
+    std::array<std::byte, 2> two {};
+    const auto cross_row =
+        read_cells(layout, storage, k_source, /*row=*/0, /*x=*/k_width - 1u, two);
+    ASSERT_FALSE(cross_row);
+    EXPECT_EQ(cross_row.error(), LayerSourceError::OutOfRange);
+
+    // A full row from column 0 fits exactly.
+    std::array<std::byte, 4> full {};
+    EXPECT_TRUE(read_cells(layout, storage, k_source, /*row=*/0, /*x=*/0, full));
+
+    // Starting one cell later overflows the row by exactly one cell.
+    EXPECT_FALSE(read_cells(layout, storage, k_source, /*row=*/0, /*x=*/1u, full));
+
+    // x == width is out of range for a non-empty fragment...
+    EXPECT_FALSE(read_cells(layout, storage, k_source, /*row=*/0, /*x=*/k_width, one));
+
+    // ...but an empty fragment issues no read at all.
+    EXPECT_TRUE(read_cells(
+        layout, storage, k_source, /*row=*/0, /*x=*/k_width, std::span<std::byte>{}));
+}
+
+
+TEST(LayerSource, ReadCellRangeRejectsHugeColumnWithoutWraparound)
+{
+    RecordingStorage storage;
+    LayerSourceLayout layout {};
+
+    ASSERT_TRUE(open_default(storage, layout));
+    storage.clear_requests();
+
+    // A column this large could only pass a bound check whose arithmetic
+    // wrapped in a 32-bit size_t; it must be rejected before the fragment
+    // size is ever combined with it.
+    constexpr std::uint32_t huge_x = std::numeric_limits<std::uint32_t>::max();
+
+    std::array<std::byte, 1> one {};
+    const auto result =
+        read_cells(layout, storage, k_source, /*row=*/0, /*x=*/huge_x, one);
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), LayerSourceError::OutOfRange);
+
+    const auto empty_result = read_cells(
+        layout, storage, k_source, /*row=*/0, /*x=*/huge_x, std::span<std::byte>{});
+    ASSERT_FALSE(empty_result);
+    EXPECT_EQ(empty_result.error(), LayerSourceError::OutOfRange);
+
+    EXPECT_TRUE(storage.requests().empty());
+}
+
+
 TEST(LayerSource, RejectsSourceShorterThanDeclared)
 {
     RecordingStorage storage;
@@ -726,6 +863,46 @@ TEST(LayerSource, RejectsMalformedNumbers)
         ASSERT_FALSE(result);
         EXPECT_EQ(result.error(), LayerSourceError::MalformedMetadata);
     }
+}
+
+
+TEST(LayerSource, RejectsMetadataLineWithoutColon)
+{
+    // A line without a colon is malformed even when it is not a known
+    // key: streaming skip applies to records, not to arbitrary lines.
+    const std::string source =
+        make_header({"V:1.0", "GARBAGE", "D:4 3", "P:0 0"})
+        + make_grid(k_width, k_height);
+
+    RecordingStorage storage;
+    storage.set_bytes(source);
+
+    const auto result = open_layer_source(storage, k_source);
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), LayerSourceError::MalformedMetadata);
+}
+
+
+TEST(LayerSource, RejectsKnownRecordWithOversizedPayload)
+{
+    // A known-record payload longer than any well-formed payload (41
+    // bytes) cannot be valid: the excess is streamed away and the record
+    // is rejected.
+    const std::string source =
+        "V:1.0\n"
+        + std::string("D:")
+        + std::string(100, '9')
+        + " 3\nP:0 0\n\n"
+        + make_grid(k_width, k_height);
+
+    RecordingStorage storage;
+    storage.set_bytes(source);
+
+    const auto result = open_layer_source(storage, k_source);
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), LayerSourceError::MalformedMetadata);
 }
 
 

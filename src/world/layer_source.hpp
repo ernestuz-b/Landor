@@ -385,108 +385,48 @@ struct CoreRecords
 };
 
 
+/// The longest payload a well-formed V / D / P record can have.
+///
+/// A version payload is two unsigned 64-bit integers (decimal or '0x'
+/// hexadecimal) separated by '.', and a D / P payload is two such integers
+/// (optionally signed for P) separated by a space. Each integer is at most
+/// 20 characters, so a valid payload never exceeds 41 bytes. A known
+/// record's payload can therefore be buffered in a fixed array of this
+/// size; anything longer is necessarily malformed.
+inline constexpr std::size_t k_max_known_payload = 64;
+
+
 /**
- * Interpret one complete metadata line.
+ * Streaming classification of one metadata line.
  *
- * Unknown records (including future ones) are skipped without being
- * interpreted, per the extensibility rule in LAYER_SOURCE_FORMAT.md.
+ * Only the first two bytes of a line decide whether it is a known record
+ * (a single 'V', 'D' or 'P' followed by ':') or an unknown one, so the
+ * state machine never needs to retain more than those two bytes plus a
+ * bounded known payload. Unknown payloads are streamed away without
+ * buffering, which lets a metadata record span any number of bounded
+ * Storage reads.
  */
-[[nodiscard]] constexpr std::expected<void, LayerSourceError>
-process_metadata_line(
-    std::span<const std::byte> line,
-    CoreRecords& core) noexcept
+enum class LineState : std::uint8_t
 {
-    const auto colon = find_byte(line, k_colon);
-    if (colon == k_npos)
-    {
-        return std::unexpected(LayerSourceError::MalformedMetadata);
-    }
+    /// No line byte consumed yet.
+    AtLineStart,
 
-    const auto key = line.first(colon);
-    const auto payload = line.subspan(colon + 1);
+    /// First byte was 'V', 'D' or 'P'; the second byte decides.
+    FirstKeyCandidate,
 
-    if (key.size() == 1)
-    {
-        if (key[0] == std::byte{'V'})
-        {
-            if (core.version_seen)
-            {
-                return std::unexpected(LayerSourceError::DuplicateRecord);
-            }
+    /// Unknown record: consume until LF, remembering whether a colon was
+    /// seen (a record without a colon is malformed).
+    SkippingUnknown,
 
-            std::uint64_t major = 0;
-            std::uint64_t minor = 0;
-            if (!parse_version(payload, major, minor))
-            {
-                return std::unexpected(LayerSourceError::MalformedMetadata);
-            }
+    /// Known 'V' record: buffering the bounded payload.
+    ParsingVersion,
 
-            if (major != 1 || minor != 0)
-            {
-                return std::unexpected(LayerSourceError::UnsupportedVersion);
-            }
+    /// Known 'D' record: buffering the bounded payload.
+    ParsingDims,
 
-            core.version_major = static_cast<std::uint8_t>(major);
-            core.version_minor = static_cast<std::uint8_t>(minor);
-            core.version_seen = true;
-            return {};
-        }
-
-        if (key[0] == std::byte{'D'})
-        {
-            if (core.dimensions_seen)
-            {
-                return std::unexpected(LayerSourceError::DuplicateRecord);
-            }
-
-            std::int64_t width = 0;
-            std::int64_t height = 0;
-            if (!parse_two_ints(payload, false, width, height))
-            {
-                return std::unexpected(LayerSourceError::MalformedMetadata);
-            }
-
-            if (width == 0 || height == 0)
-            {
-                return std::unexpected(LayerSourceError::ZeroDimension);
-            }
-
-            core.width = static_cast<std::uint64_t>(width);
-            core.height = static_cast<std::uint64_t>(height);
-            core.dimensions_seen = true;
-            return {};
-        }
-
-        if (key[0] == std::byte{'P'})
-        {
-            if (core.position_seen)
-            {
-                return std::unexpected(LayerSourceError::DuplicateRecord);
-            }
-
-            std::int64_t x = 0;
-            std::int64_t y = 0;
-            if (!parse_two_ints(payload, true, x, y))
-            {
-                return std::unexpected(LayerSourceError::MalformedMetadata);
-            }
-
-            if (x < k_int32_min || x > k_int32_max
-                || y < k_int32_min || y > k_int32_max)
-            {
-                return std::unexpected(LayerSourceError::Overflow);
-            }
-
-            core.position_x = x;
-            core.position_y = y;
-            core.position_seen = true;
-            return {};
-        }
-    }
-
-    // Unknown / future record: skip without interpreting the payload.
-    return {};
-}
+    /// Known 'P' record: buffering the bounded payload.
+    ParsingPos,
+};
 
 
 /**
@@ -585,10 +525,8 @@ open_layer_source(const Backend& storage, storage::SourceId source)
     }
 
     std::array<std::byte, layer_source_metadata_read_size> read_buffer {};
-    std::array<std::byte, layer_source_metadata_read_size> line_buffer {};
 
     detail::CoreRecords core {};
-    std::size_t line_length = 0;
     bool previous_was_newline = false;
 
     // Line-level errors are reported only once the metadata block is known
@@ -596,6 +534,117 @@ open_layer_source(const Backend& storage, storage::SourceId source)
     // fundamental diagnosis and subsumes them.
     bool has_line_error = false;
     LayerSourceError line_error = LayerSourceError::MalformedMetadata;
+
+    auto record_error = [&has_line_error, &line_error](LayerSourceError error)
+    {
+        if (!has_line_error)
+        {
+            has_line_error = true;
+            line_error = error;
+        }
+    };
+
+    // Per-line streaming state.
+    detail::LineState line_state = detail::LineState::AtLineStart;
+    std::byte key_candidate = std::byte{0};    // valid in FirstKeyCandidate
+    bool unknown_colon_seen = false;           // valid in SkippingUnknown
+    std::array<std::byte, detail::k_max_known_payload> payload {};
+    std::size_t payload_length = 0;            // valid in the Parsing* states
+
+    // Finalize the line just ended by a non-terminating LF.
+    auto finish_line = [&]()
+    {
+        switch (line_state)
+        {
+            case detail::LineState::AtLineStart:
+            case detail::LineState::FirstKeyCandidate:
+                // Empty line, or a bare 'V'/'D'/'P' with no colon.
+                record_error(LayerSourceError::MalformedMetadata);
+                break;
+
+            case detail::LineState::SkippingUnknown:
+                if (!unknown_colon_seen)
+                {
+                    record_error(LayerSourceError::MalformedMetadata);
+                }
+                break;
+
+            case detail::LineState::ParsingVersion:
+            {
+                const auto view =
+                    std::span<const std::byte>(payload.data(), payload_length);
+                std::uint64_t major = 0;
+                std::uint64_t minor = 0;
+                if (!detail::parse_version(view, major, minor))
+                {
+                    record_error(LayerSourceError::MalformedMetadata);
+                }
+                else if (major != 1 || minor != 0)
+                {
+                    record_error(LayerSourceError::UnsupportedVersion);
+                }
+                else
+                {
+                    core.version_major = static_cast<std::uint8_t>(major);
+                    core.version_minor = static_cast<std::uint8_t>(minor);
+                    core.version_seen = true;
+                }
+                break;
+            }
+
+            case detail::LineState::ParsingDims:
+            {
+                const auto view =
+                    std::span<const std::byte>(payload.data(), payload_length);
+                std::int64_t width = 0;
+                std::int64_t height = 0;
+                if (!detail::parse_two_ints(view, false, width, height))
+                {
+                    record_error(LayerSourceError::MalformedMetadata);
+                }
+                else if (width == 0 || height == 0)
+                {
+                    record_error(LayerSourceError::ZeroDimension);
+                }
+                else
+                {
+                    core.width = static_cast<std::uint64_t>(width);
+                    core.height = static_cast<std::uint64_t>(height);
+                    core.dimensions_seen = true;
+                }
+                break;
+            }
+
+            case detail::LineState::ParsingPos:
+            {
+                const auto view =
+                    std::span<const std::byte>(payload.data(), payload_length);
+                std::int64_t x = 0;
+                std::int64_t y = 0;
+                if (!detail::parse_two_ints(view, true, x, y))
+                {
+                    record_error(LayerSourceError::MalformedMetadata);
+                }
+                else if (x < detail::k_int32_min || x > detail::k_int32_max
+                    || y < detail::k_int32_min || y > detail::k_int32_max)
+                {
+                    record_error(LayerSourceError::Overflow);
+                }
+                else
+                {
+                    core.position_x = x;
+                    core.position_y = y;
+                    core.position_seen = true;
+                }
+                break;
+            }
+        }
+
+        line_state = detail::LineState::AtLineStart;
+        key_candidate = std::byte{0};
+        unknown_colon_seen = false;
+        payload_length = 0;
+    };
 
     const std::uint64_t end = static_cast<std::uint64_t>(total_size);
 
@@ -630,28 +679,97 @@ open_layer_source(const Backend& storage, storage::SourceId source)
                     return detail::finalize(core, data_offset, end);
                 }
 
-                const auto line =
-                    std::span<const std::byte>(line_buffer.data(), line_length);
-                const auto line_result = detail::process_metadata_line(line, core);
-                if (!line_result && !has_line_error)
-                {
-                    has_line_error = true;
-                    line_error = line_result.error();
-                }
-
-                line_length = 0;
                 previous_was_newline = true;
+                finish_line();
             }
             else
             {
-                if (line_length == line_buffer.size())
-                {
-                    // A single metadata line longer than the bounded buffer.
-                    return std::unexpected(LayerSourceError::MalformedMetadata);
-                }
-
-                line_buffer[line_length++] = cell;
                 previous_was_newline = false;
+
+                switch (line_state)
+                {
+                    case detail::LineState::AtLineStart:
+                        if (cell == std::byte{'V'} || cell == std::byte{'D'}
+                            || cell == std::byte{'P'})
+                        {
+                            key_candidate = cell;
+                            line_state = detail::LineState::FirstKeyCandidate;
+                        }
+                        else
+                        {
+                            unknown_colon_seen = (cell == detail::k_colon);
+                            line_state = detail::LineState::SkippingUnknown;
+                        }
+                        break;
+
+                    case detail::LineState::FirstKeyCandidate:
+                        if (cell != detail::k_colon)
+                        {
+                            // Multi-character key: unknown record.
+                            unknown_colon_seen = false;
+                            line_state = detail::LineState::SkippingUnknown;
+                        }
+                        else if (key_candidate == std::byte{'V'}
+                            && core.version_seen)
+                        {
+                            record_error(LayerSourceError::DuplicateRecord);
+                            unknown_colon_seen = true;
+                            line_state = detail::LineState::SkippingUnknown;
+                        }
+                        else if (key_candidate == std::byte{'D'}
+                            && core.dimensions_seen)
+                        {
+                            record_error(LayerSourceError::DuplicateRecord);
+                            unknown_colon_seen = true;
+                            line_state = detail::LineState::SkippingUnknown;
+                        }
+                        else if (key_candidate == std::byte{'P'}
+                            && core.position_seen)
+                        {
+                            record_error(LayerSourceError::DuplicateRecord);
+                            unknown_colon_seen = true;
+                            line_state = detail::LineState::SkippingUnknown;
+                        }
+                        else
+                        {
+                            payload_length = 0;
+                            if (key_candidate == std::byte{'V'})
+                            {
+                                line_state = detail::LineState::ParsingVersion;
+                            }
+                            else if (key_candidate == std::byte{'D'})
+                            {
+                                line_state = detail::LineState::ParsingDims;
+                            }
+                            else
+                            {
+                                line_state = detail::LineState::ParsingPos;
+                            }
+                        }
+                        break;
+
+                    case detail::LineState::SkippingUnknown:
+                        unknown_colon_seen =
+                            unknown_colon_seen || (cell == detail::k_colon);
+                        break;
+
+                    case detail::LineState::ParsingVersion:
+                    case detail::LineState::ParsingDims:
+                    case detail::LineState::ParsingPos:
+                        if (payload_length == payload.size())
+                        {
+                            // Longer than any well-formed known payload:
+                            // necessarily malformed. Stream the rest away.
+                            record_error(LayerSourceError::MalformedMetadata);
+                            unknown_colon_seen = true;
+                            line_state = detail::LineState::SkippingUnknown;
+                        }
+                        else
+                        {
+                            payload[payload_length++] = cell;
+                        }
+                        break;
+                }
             }
         }
 
@@ -672,7 +790,16 @@ read_cells(
     std::uint32_t x,
     std::span<std::byte> destination)
 {
-    if (row >= layout.height || x + destination.size() > layout.width)
+    // Subtraction-style bounds: x + destination.size() would be computed in
+    // size_t, which wraps on 32-bit targets. width - x cannot underflow
+    // because x <= width is checked first, and the comparison widens to
+    // size_t without truncation.
+    if (row >= layout.height || x > layout.width)
+    {
+        return std::unexpected(LayerSourceError::OutOfRange);
+    }
+
+    if (destination.size() > static_cast<std::size_t>(layout.width - x))
     {
         return std::unexpected(LayerSourceError::OutOfRange);
     }
