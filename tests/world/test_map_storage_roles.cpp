@@ -8,14 +8,18 @@
 //   - current authored resolution uses only the authored role: with the
 //     same SourceId present in two different roots, Map answers from the
 //     authored root, never from the runtime root;
-//   - the runtime role may be absent or irrelevant to current reads:
-//     authored access still succeeds when the runtime root holds no such
+//   - the runtime role may be absent while no runtime layer binding names
+//     the layer: without a binding Map never inspects the runtime storage,
+//     so authored access still succeeds when the runtime root holds no such
 //     source at all, and the absence is not an error;
 //   - the same Storage object may fill both roles; physical separation is
 //     optional.
 //
-// No runtime behaviour exists yet: in this slice Map never opens, reads or
-// writes the runtime storage. The constructor contract itself is pinned by
+// These tests deliberately use empty runtime binding spans, so they pin the
+// no-binding path: runtime state is read only when a binding names the layer
+// (D-36), and a bound-but-absent runtime source would be a checked-access
+// error, covered in test_map_runtime_catalogue.cpp and
+// test_map_runtime_overlay.cpp. The constructor contract itself is pinned by
 // the header tripwire (tests/test_world_headers.cpp).
 
 #include <gtest/gtest.h>
@@ -251,7 +255,8 @@ TEST_F(MapStorageRolesTest, RuntimeSourceMayBeAbsentWithoutAffectingAuthoredAcce
     const auto placed = map.place(k_patch_id, Coord32(0, 0));
     ASSERT_TRUE(placed.has_value());
 
-    // The absent runtime source is not consulted, so it is not an error.
+    // No runtime binding names the layer, so the runtime storage is never
+    // inspected: the absent runtime source is not an error.
     const auto result = map.value<Terrain>(Coord32(2, 1));
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(*result, static_cast<std::uint8_t>('A'));

@@ -1,5 +1,5 @@
 // Behavioural and compile-time tests for the Map runtime layer binding
-// catalogue.
+// catalogue and the runtime overlay it names.
 //
 // The exercised facts:
 //
@@ -9,9 +9,10 @@
 //     the contract;
 //   - the same Storage object can still be used for the authored and the
 //     runtime role at the same time as the binding catalogue;
-//   - runtime bindings cause zero runtime I/O today: a bound runtime source
-//     holding different bytes, or a runtime root with no such source at
-//     all, cannot change a current read.
+//   - a bound runtime source is now consulted by checked reads (D-36): a
+//     non-space runtime cell answers over authored state, and a present
+//     binding whose source cannot be opened fails the access instead of
+//     falling through.
 //
 // The private Map::runtime_binding() seam is deliberately not exposed; the
 // catalogue invariants are unit-tested through the free
@@ -37,6 +38,7 @@
 #include <string_view>
 #include <system_error>
 #include <type_traits>
+#include <variant>
 
 
 namespace
@@ -100,6 +102,41 @@ using TestMap = landor::geo::Map<2, 4, 4, ConstantFallback, Coord32, Terrain>;
     for (const auto& row : rows)
     {
         file += row;
+        file += '\n';
+    }
+    return file;
+}
+
+
+/// One 16x16 version 1.0 dense runtime overlay file: every cell holds
+/// `fill`. It matches the 16x16 Map area anchored at (0, 0), so it passes
+/// runtime geometry validation as-is.
+[[nodiscard]] std::string make_runtime_file(char fill)
+{
+    std::string file = "V:1.0\nD:16 16\nP:0 0\n\n";
+    for (std::uint32_t y = 0; y < 16; ++y)
+    {
+        file.append(16, fill);
+        file += '\n';
+    }
+    return file;
+}
+
+
+/// One 16x16 version 1.0 dense runtime overlay file: every cell is space
+/// (0x20, "no runtime contribution") except the single marker cell.
+[[nodiscard]] std::string make_runtime_file_with_marker(
+    char marker_char,
+    std::uint32_t marker_col,
+    std::uint32_t marker_row)
+{
+    std::string file = "V:1.0\nD:16 16\nP:0 0\n\n";
+    for (std::uint32_t y = 0; y < 16; ++y)
+    {
+        for (std::uint32_t x = 0; x < 16; ++x)
+        {
+            file += (x == marker_col && y == marker_row) ? marker_char : ' ';
+        }
         file += '\n';
     }
     return file;
@@ -184,13 +221,9 @@ protected:
     };
     static constexpr Area32 k_map_area {Coord32(0, 0), Coord32(15, 15)};
 
-    // Shared 4x4 row patterns; cell (2, 1) is the probe cell and differs
-    // between the authored and the runtime spelling.
+    // Shared 4x4 authored row pattern; cell (2, 1) is the probe cell.
     static constexpr std::array<std::string_view, 4> rows_a {
         "qwer", "tyAu", "opis", "dfgh"
-    };
-    static constexpr std::array<std::string_view, 4> rows_r {
-        "qwer", "tyRu", "opis", "dfgh"
     };
 };
 
@@ -257,50 +290,15 @@ TEST_F(MapRuntimeCatalogueTest, EmptyRuntimeBindingSpanConstructsAndReadsAuthore
 }
 
 
-// --- One binding, zero runtime I/O ---------------------------------------------
+// --- One binding, live runtime reads ------------------------------------------
 
-TEST_F(MapRuntimeCatalogueTest, OneRuntimeBindingStillReadsAuthoredOnly)
+// D-36: a non-space runtime cell is authoritative over all authored
+// Placements and the fallback. The runtime root holds 'R' at the probe cell
+// behind the bound SourceId, so the runtime byte now answers.
+TEST_F(MapRuntimeCatalogueTest, BoundRuntimeCellOverridesAuthored)
 {
-    // Both roots carry the same SourceId table. The runtime root holds a
-    // different byte ('R') at the probe cell behind the bound SourceId, so
-    // any runtime read would have changed the answer.
     write_source(m_authored_root_path, make_layer_file(4, 4, 0, 0, rows_a));
-    write_source(m_runtime_root_path, make_layer_file(4, 4, 0, 0, rows_r));
-
-    const std::array<RuntimeLayerBinding, 1> runtime_layers {
-        {Terrain::id, SourceId {0}}
-    };
-
-    Storage authored_storage {m_authored_root, m_sources};
-    Storage runtime_storage {m_runtime_root, m_sources};
-    ConstantFallback fallback {};
-    TestMap map {
-        1,
-        k_map_area,
-        std::span<const Patch> {m_patches},
-        authored_storage,
-        runtime_storage,
-        std::span<const RuntimeLayerBinding> {runtime_layers},
-        fallback
-    };
-
-    const auto placed = map.place(k_patch_id, Coord32(0, 0));
-    ASSERT_TRUE(placed.has_value());
-
-    // The bound runtime source is not consulted, so the authored byte
-    // answers.
-    const auto result = map.value<Terrain>(Coord32(2, 1));
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(*result, static_cast<std::uint8_t>('A'));
-}
-
-
-TEST_F(MapRuntimeCatalogueTest, BoundSourceMayBeAbsentInRuntimeStorage)
-{
-    // Only the authored root contains the source. The binding names a
-    // SourceId that does not exist in the runtime root; no read of the
-    // runtime role happens, so its absence is not an error.
-    write_source(m_authored_root_path, make_layer_file(4, 4, 0, 0, rows_a));
+    write_source(m_runtime_root_path, make_runtime_file_with_marker('R', 2, 1));
 
     const std::array<RuntimeLayerBinding, 1> runtime_layers {
         {Terrain::id, SourceId {0}}
@@ -324,15 +322,56 @@ TEST_F(MapRuntimeCatalogueTest, BoundSourceMayBeAbsentInRuntimeStorage)
 
     const auto result = map.value<Terrain>(Coord32(2, 1));
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(*result, static_cast<std::uint8_t>('A'));
+    EXPECT_EQ(*result, static_cast<std::uint8_t>('R'));
 }
 
 
+// D-36: a present binding whose runtime source cannot be opened is a real
+// checked-access failure, not an absent overlay. The runtime root holds no
+// file for the bound SourceId; the reader maps that storage failure to
+// LayerSourceError::StorageFailed and no fall-through to authored state
+// happens.
+TEST_F(MapRuntimeCatalogueTest, BoundRuntimeSourceAbsenceIsAnError)
+{
+    // Only the authored root contains a source file.
+    write_source(m_authored_root_path, make_layer_file(4, 4, 0, 0, rows_a));
+
+    const std::array<RuntimeLayerBinding, 1> runtime_layers {
+        {Terrain::id, SourceId {0}}
+    };
+
+    Storage authored_storage {m_authored_root, m_sources};
+    Storage runtime_storage {m_runtime_root, m_sources};
+    ConstantFallback fallback {};
+    TestMap map {
+        1,
+        k_map_area,
+        std::span<const Patch> {m_patches},
+        authored_storage,
+        runtime_storage,
+        std::span<const RuntimeLayerBinding> {runtime_layers},
+        fallback
+    };
+
+    const auto placed = map.place(k_patch_id, Coord32(0, 0));
+    ASSERT_TRUE(placed.has_value());
+
+    const auto result = map.value<Terrain>(Coord32(2, 1));
+    ASSERT_FALSE(result.has_value());
+    const auto* error = std::get_if<landor::geo::LayerSourceError>(&result.error());
+    ASSERT_NE(error, nullptr);
+    EXPECT_EQ(*error, landor::geo::LayerSourceError::StorageFailed);
+}
+
+
+// One physical Storage object fills both semantic roles while the binding
+// catalogue is non-empty. The shared source file carries the 16x16 overlay
+// spelling: the runtime role opens and validates it, resolves every cell of
+// the requested Chunk, and the 4x4 authored patch is never opened (its D
+// would fail authored geometry validation if it were).
 TEST_F(MapRuntimeCatalogueTest, SameStorageObjectFillsBothRolesWithABinding)
 {
-    // One physical Storage object fills both semantic roles while the
-    // binding catalogue is non-empty.
-    write_source(m_authored_root_path, make_layer_file(4, 4, 0, 0, rows_a));
+    write_source(m_authored_root_path, make_runtime_file('A'));
 
     const std::array<RuntimeLayerBinding, 1> runtime_layers {
         {Terrain::id, SourceId {0}}

@@ -102,7 +102,7 @@ must not be reused blindly as a runtime identity scheme, because Patch name alon
 
 ## Read resolution
 
-For a layer value that is not already resident as current state, stored resolution conceptually proceeds from most mutable to least mutable:
+For a layer value that is not already resident as current state, stored resolution proceeds from most mutable to least mutable. This order is now implemented in checked Map reads (D-36):
 
 ```text
 runtime/materialized source
@@ -110,7 +110,7 @@ runtime/materialized source
     -> procedural/default contribution
 ```
 
-The exact precedence among multiple authored Placements is a separate Map-resolution rule and is not defined here.
+A non-space runtime cell is authoritative over all authored Placements and the procedural/default fallback; a space runtime cell means "no runtime contribution" and resolution continues downward. The exact precedence among multiple authored Placements is a separate Map-resolution rule (D-34) and is not defined here.
 
 Runtime state has priority because it represents changes already made to the live world.
 
@@ -186,9 +186,9 @@ storage::Storage&                      runtime storage
 std::span<const RuntimeLayerBinding>   runtime layers
 ```
 
-Existing authored resolution uses the authored storage only: `open_layer_source()` and `read_cells()` inside `Map::resolve_chunk<LayerT>()` receive the authored reference, so Map never reads from or writes to the runtime role. The runtime storage reference is stored, deliberately unused by resolution, and pinned in the Map constructor/lifetime seam for the future runtime reader/write-back slice. No runtime overlay resolution, runtime SourceId mapping or write-back exists yet.
+Resolution is role-separated: authored reads (`open_layer_source()` and `read_cells()` for Placement sources inside `Map::resolve_chunk<LayerT>()`) receive the authored reference, and runtime overlay reads receive the runtime reference, so each role is only ever touched for its own sources. Map never writes to either role in the current slice: runtime sources are read-only from Map's perspective until write-back exists. Runtime overlay read resolution is implemented (D-36): for one missing layer Chunk the bound runtime source is opened and validated exactly once, then unresolved in-Map cells are read one at a time; when no binding names the layer the runtime storage is never inspected. Runtime `SourceId` allocation/registration and write-back do not exist yet; the `SourceId` a runtime source carries is supplied by the binding catalogue.
 
-The binding catalogue is identity only: a binding `{ layer, source }` names the logical runtime source of `(Map::id(), layer)` in the runtime storage role, and the Map constructor asserts that every binding names a layer supported by the Map type and that no `LayerId` appears twice (D-35). No read or write path consults the catalogue yet, so it performs no I/O today.
+The binding catalogue drives read resolution: a binding `{ layer, source }` names the logical runtime source of `(Map::id(), layer)` in the runtime storage role, and the Map constructor asserts that every binding names a layer supported by the Map type and that no `LayerId` appears twice (D-35). Checked reads consult it through the private `Map::runtime_binding<LayerT>()` seam; no write path consults it yet.
 
 Both references currently use the build-selected `storage::Storage` type. That is current source reality, not a permanent architectural prohibition against heterogeneous authored/runtime backing implementations on a concrete target.
 
@@ -223,7 +223,6 @@ This document does not yet define:
 - runtime source filenames;
 - runtime `SourceId` allocation/registration;
 - runtime file creation API;
-- runtime/materialized override precedence above authored Placements (the runtime source identity/geometry itself is pinned by D-35, and authored precedence is pinned by D-34);
 - dirty-state granularity;
 - write-back scheduling;
 - crash consistency or atomic replacement policy;

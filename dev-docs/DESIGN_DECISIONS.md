@@ -295,7 +295,7 @@ The SPSC publication rules must follow the modern C++ memory model.
 
 ## D-32 — Map preserves lower-level error domains
 
-**Decision:** checked Map access returns `MapResult<T>` (`src/world/map_result.hpp`). `MapError` is `std::variant<MapErrorCode, LayerSourceError, AuthoredLayerSourceError>`: Map adds only its own local outcomes (`OutOfBounds`, `CacheFull`) as a small enum and preserves the exact lower-level source errors rather than flattening all failures into one large Map enum. `storage::Error` never appears directly; the layer source reader already maps Storage failures to `LayerSourceError::StorageFailed`.
+**Decision:** checked Map access returns `MapResult<T>` (`src/world/map_result.hpp`). `MapError` is `std::variant<MapErrorCode, LayerSourceError, AuthoredLayerSourceError, RuntimeLayerSourceError>`: Map adds only its own local outcomes (`OutOfBounds`, `CacheFull`) as a small enum and preserves the exact lower-level source errors rather than flattening all failures into one large Map enum. The fourth alternative (D-36) keeps the same shape for the runtime role: `.layer` parser/read failures remain the exact existing `LayerSourceError` regardless of source role, authored Patch/source geometry failures remain `AuthoredLayerSourceError`, and runtime Map/source geometry failures are `RuntimeLayerSourceError` — no wrapper duplication of `LayerSourceError`. `storage::Error` never appears directly; the layer source reader already maps Storage failures to `LayerSourceError::StorageFailed`.
 
 **Why:** the seam that failed is exactly what the caller needs to react to. Flattening would lose the distinction between "coordinate outside the Map", "bounded cache cannot take another slot yet", a specific `.layer` parse/read diagnosis and a specific Patch/source geometry diagnosis. Keeping each seam's error vocabulary authoritative avoids a duplicate enum that would have to be kept in sync as the lower domains grow.
 
@@ -341,3 +341,22 @@ Map carries the binding catalogue as a borrowed `std::span<const RuntimeLayerBin
 - the runtime backing source may be much larger than RAM without being loaded, rewritten or materialised in whole, and Storage remains free to represent the logical source however its backend requires.
 
 The decision pins the **logical** source. It does not require a filesystem backend to allocate or load the complete object in RAM, and it does not pin physical file naming, `SourceId` allocation/registration, file creation, or write-back policy.
+
+## D-36 — Runtime materialized state precedes authored and fallback state
+
+**Decision:** in checked Map reads, the implemented resolution order is:
+
+```text
+resident Cache
+    -> runtime/materialized overlay
+    -> authored Placements, highest PlacementId first
+    -> terminal fallback
+```
+
+A non-space runtime cell is the authoritative current world value for its cell: it outranks every authored Placement and the terminal fallback. A space runtime cell (`0x20`) contributes nothing — it is "this source contributes nothing here" — so the cell continues to authored Placements and then to the fallback. There is exactly one logical runtime source per `(MapId, LayerId)` (D-35), so there is no runtime-vs-runtime precedence. Precedence is per-cell, not per-source or per-Chunk: within one canonical Chunk, some cells may resolve from the runtime overlay, others from authored state, and others from the fallback.
+
+For one missing layer Chunk the bound runtime source is opened and geometry-validated exactly once, before any per-cell reading; the per-cell loop then issues bounded `read_cells()` reads through the shared reader, never touching Storage directly. Cache padding cells outside `Map::area()` are never runtime-read, authored-read or fallback-generated: they remain value-initialized.
+
+A missing binding (`runtime_binding<LayerT>() == nullptr`) is normal absence: no runtime overlay exists for that Map layer, and authored/fallback resolution is exactly as before. A present binding whose source cannot be opened, parsed or geometry-validated is a real checked-access failure — the exact `LayerSourceError` or `RuntimeLayerSourceError` propagates instead of falling through to authored state. When the runtime overlay resolves every logical cell of the requested Chunk, no authored source is opened and the fallback is never queried; when it resolves only some cells, authored resolution sees only the still-unresolved cells through the existing resolved-mask seam.
+
+Runtime sources are read-only from Map's perspective in this decision: it pins read resolution only. No mutation, dirty state, write-back, runtime file creation or `SourceId` allocation is introduced.

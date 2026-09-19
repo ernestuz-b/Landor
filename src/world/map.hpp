@@ -165,8 +165,8 @@ using MapPlacementResult =
  * map_result.hpp): success carries the layer value or the complete Tile;
  * failure carries the exact MapError from the seam that failed. Map-local
  * failures are MapErrorCode::OutOfBounds and MapErrorCode::CacheFull; source
- * failures keep their exact lower-level domains, LayerSourceError and
- * AuthoredLayerSourceError.
+ * failures keep their exact lower-level domains, LayerSourceError,
+ * AuthoredLayerSourceError and RuntimeLayerSourceError.
  *
  *
  * Storage and alteration
@@ -187,12 +187,12 @@ using MapPlacementResult =
  *
  * The roles are semantic references, not a physical-separation requirement:
  * the same Storage object may legitimately fill both roles on a host or a
- * small target. Current resolution consults the authored role only —
- * open_layer_source() and read_cells() inside resolve_chunk<LayerT>()
- * receive the authored reference — while the runtime role is stored but not
- * yet consulted by any read or write. Runtime overlay resolution, runtime
- * SourceId mapping and write-back are future work (see
- * LAYER_STORAGE_MODEL.md).
+ * small target. Chunk-plane resolution consults both roles when both are
+ * live for a layer: authored sources are opened and read through the
+ * authored reference, and the bound runtime overlay is opened and read
+ * through the runtime reference (see resolve_chunk<LayerT>()). Map still
+ * writes neither role: runtime SourceId allocation, registration, file
+ * creation and write-back are future work (see LAYER_STORAGE_MODEL.md).
  *
  * Storage abstracts where those bytes physically live.
  *
@@ -228,9 +228,15 @@ using MapPlacementResult =
  * Zero bindings means this Map currently has no persistent runtime overlay
  * source for those layers. That is not the same as an unsupported layer.
  *
- * The catalogue is identity only. No current read or write path opens,
- * reads or writes a runtime source through it, and SourceId allocation,
- * registration and file creation remain open (see LAYER_STORAGE_MODEL.md).
+ * Reads consult the catalogue: when a binding names a layer being resolved,
+ * resolve_chunk<LayerT>() opens the bound runtime source through the runtime
+ * storage role, validates it once against the Map area and reads the
+ * still-unresolved in-Map cells from it. A non-space runtime cell is
+ * authoritative over all authored Placements and the fallback (D-36); a
+ * space runtime cell contributes nothing and resolution continues downward.
+ * No write path exists yet: Map only reads the runtime role, and SourceId
+ * allocation, registration and file creation remain open (see
+ * LAYER_STORAGE_MODEL.md).
  *
  *
  * Placements
@@ -333,8 +339,8 @@ public:
      * materialisation and write-back must be able to write it. The same
      * Storage object may legitimately fill both roles.
      *
-     * Current resolution consults the authored role only; the runtime role
-     * is stored but not yet read or written.
+     * Resolution reads the authored role for authored sources and the
+     * runtime role for the bound runtime overlay; it writes neither.
      *
      * runtime_layers is the runtime layer binding catalogue, scoped to this
      * Map instance (see the class documentation): a binding { layer, source }
@@ -348,9 +354,8 @@ public:
      * The fallback provider is the final source of per-layer resolution. Map
      * queries it per layer and per in-Map world coordinate and receives
      * exactly LayerT::value_type; see layer_fallback.hpp for the contract.
-     * value<LayerT>() reaches it as the last step of chunk-plane resolution;
-     * no runtime/materialized override sits above the authored Placements
-     * yet.
+     * value<LayerT>() reaches it as the last step of chunk-plane resolution,
+     * below the bound runtime overlay and the authored Placements.
      */
     constexpr Map(
         MapId id,
@@ -418,15 +423,16 @@ public:
      * This is checked Map access just like at(): position must be validated
      * before cache/storage work begins.
      *
-     * Resolution may obtain the value from resident working state, authored
-     * Patch data, procedural generation or a layer default. A missing authored
-     * layer is not an error.
+     * Resolution may obtain the value from resident working state, the
+     * bound runtime/materialized overlay, authored Patch data, procedural
+     * generation or a layer default. A missing authored layer is not an
+     * error.
      *
      * Failure carries the exact MapError from the seam that failed:
      * MapErrorCode::OutOfBounds for a coordinate outside this Map, the exact
-     * LayerSourceError / AuthoredLayerSourceError from source resolution, or
-     * MapErrorCode::CacheFull when the bounded Cache cannot accept the
-     * required chunk.
+     * LayerSourceError / AuthoredLayerSourceError / RuntimeLayerSourceError
+     * from source resolution, or MapErrorCode::CacheFull when the bounded
+     * Cache cannot accept the required chunk.
      */
     template<Layer LayerT>
         requires (std::same_as<LayerT, Layers> || ...)
@@ -745,8 +751,9 @@ private:
      * intentionally linear. Do not add indexing machinery without a measured
      * reason.
      *
-     * Preparatory seam: no current read or write path consults the binding
-     * yet.
+     * Reads consult the binding: resolve_chunk<LayerT>() opens the bound
+     * runtime source exactly once per chunk resolution and validates it once
+     * against the Map area. No write path consults it yet.
      */
     [[nodiscard]] constexpr const RuntimeLayerBinding*
     runtime_binding(LayerId layer) const noexcept
@@ -783,8 +790,21 @@ private:
      *
      * Every in-Map cell resolves through this order:
      *
-     *     authored Placements, highest PlacementId first
+     *     runtime/materialized overlay (when bound for this layer)
+     *         -> authored Placements, highest PlacementId first
      *         -> terminal fallback provider
+     *
+     * The runtime overlay is per (MapId, LayerId) (D-35): at most one source
+     * covers the layer, so there is no runtime-vs-runtime precedence. A
+     * non-space runtime cell is authoritative over all authored Placements
+     * and the fallback (D-36); a space runtime cell contributes nothing and
+     * resolution continues downward. When no binding exists for the layer the
+     * runtime role is never inspected and resolution starts at the authored
+     * Placements. A present binding is not optional: a bound source that
+     * cannot be opened or read fails the whole resolution with the exact
+     * LayerSourceError, and a runtime source whose geometry disagrees with
+     * the Map area fails with the exact RuntimeLayerSourceError. Only the
+     * absence of a binding skips the runtime pass.
      *
      * Authored precedence follows stable Placement identity rather than
      * array slot order: a higher PlacementId has higher precedence, so a
@@ -796,28 +816,35 @@ private:
      * 0x20). Otherwise the cell stays unresolved and resolution continues
      * downward.
      *
-     * Each Placement considered for the Chunk is resolved against its Patch,
-     * checked for a LayerT binding, and inspected for coverage of the
-     * still-unresolved in-Map cells before its source is opened; the source
-     * is then opened once, validated once against the Patch, and read cell by
-     * cell through the streaming reader — always through the authored
-     * storage role (m_authored_storage), never through the runtime role.
-     * A Placement whose relevant cells are all already resolved is never
-     * opened, so a completely hidden lower source cannot fail the access.
+     * The runtime source, and each Placement considered for the Chunk, is
+     * inspected for coverage of the still-unresolved in-Map cells before its
+     * source is opened; the source is then opened once, validated once (the
+     * runtime source against the Map area, the authored source against its
+     * Patch), and read cell by cell through the streaming reader. Authored
+     * sources are always read through the authored storage role
+     * (m_authored_storage); the runtime overlay is read through the runtime
+     * storage role (m_runtime_storage). A runtime overlay or a Placement
+     * whose relevant cells are all already resolved is never opened, so a
+     * completely hidden lower source cannot fail the access.
      *
      * A canonical Chunk can extend outside Map::area(). Those plane cells are
-     * cache padding, not logical world positions: the fallback provider is
-     * never queried for them, no authored source is consulted, and their
-     * values remain value-initialized. Public checked access can never expose
-     * them.
+     * cache padding, not logical world positions: the runtime overlay never
+     * reads them, no authored source is consulted, the fallback provider is
+     * never queried for them, and their values remain value-initialized.
+     * Public checked access can never expose them.
      *
      * World coordinates are derived from chunk.origin() plus the local x/y in
      * a wide signed intermediate, so cells near the coordinate limits are
-     * padding rather than wrapped coordinates.
+     * padding rather than wrapped coordinates. Runtime source-local
+     * coordinates are world - map.area().min(), likewise computed in a wide
+     * signed intermediate and converted to the reader's unsigned addressing
+     * only for cells already known to lie inside the non-empty Map area.
      *
      * Failure carries the exact lower-level error that ended resolution: the
-     * exact LayerSourceError from opening or reading one .layer source, or
-     * the exact AuthoredLayerSourceError from a Patch/source geometry
+     * exact LayerSourceError from opening or reading one .layer source
+     * (authored or runtime), the exact AuthoredLayerSourceError from a
+     * Patch/source geometry disagreement, or the exact
+     * RuntimeLayerSourceError from a Map/runtime-source geometry
      * disagreement. The terminal fallback provider itself never fails.
      */
     template<Layer LayerT>
@@ -851,6 +878,96 @@ private:
             }
         }
 
+        std::array<std::uint32_t, plane_cells> local_x {};
+        std::array<std::uint32_t, plane_cells> local_y {};
+        std::byte cell {};
+
+        // Runtime overlay pass: the bound source for this layer, when one
+        // exists, is opened and geometry-validated once per Chunk resolution,
+        // then read cell by cell through the streaming reader. There is no
+        // runtime-vs-runtime precedence: one Map layer has at most one
+        // runtime source (D-35).
+        if (const auto* binding = runtime_binding<LayerT>())
+        {
+            const auto opened =
+                open_layer_source(m_runtime_storage, binding->source);
+            if (!opened)
+            {
+                return std::unexpected(opened.error());
+            }
+
+            const auto validated = validate_runtime_layer_source(m_area, *opened);
+            if (!validated)
+            {
+                return std::unexpected(validated.error());
+            }
+
+            // Source-local addressing is world-oriented (D-35):
+            // local = world - map.area().min(). No Placement transform and no
+            // Patch participate.
+            const auto origin = m_area.min();
+
+            for (std::size_t y = 0; y < side && unresolved > 0; ++y)
+            {
+                for (std::size_t x = 0; x < side && unresolved > 0; ++x)
+                {
+                    const std::size_t index = y * side + x;
+                    if (!in_map[index] || resolved[index])
+                    {
+                        continue;
+                    }
+
+                    const auto world = chunk_cell_world(chunk, x, y);
+                    assert(world.has_value());
+
+                    // Wide signed subtraction: the cell lies in the non-empty
+                    // Map area, so both locals are >= 0 and within the
+                    // source extent validated against the Map. The explicit
+                    // conversion to the reader's unsigned addressing happens
+                    // only now, after the wide calculation.
+                    const std::int64_t wide_local_x =
+                        static_cast<std::int64_t>(world->x())
+                        - static_cast<std::int64_t>(origin.x());
+                    const std::int64_t wide_local_y =
+                        static_cast<std::int64_t>(world->y())
+                        - static_cast<std::int64_t>(origin.y());
+
+                    assert(wide_local_x >= 0 && wide_local_y >= 0);
+
+                    local_x[index] = static_cast<std::uint32_t>(wide_local_x);
+                    local_y[index] = static_cast<std::uint32_t>(wide_local_y);
+
+                    // One-cell reads through the reader keep the touched-row
+                    // structural validation; bulk reads are a later slice.
+                    const auto read = read_cells(
+                        *opened,
+                        m_runtime_storage,
+                        binding->source,
+                        local_y[index],
+                        local_x[index],
+                        std::span<std::byte>(&cell, 1));
+                    if (!read)
+                    {
+                        return std::unexpected(read.error());
+                    }
+
+                    if (has_contribution(cell))
+                    {
+                        // A non-space runtime cell is the current world value
+                        // and outranks every authored Placement and the
+                        // fallback (D-36).
+                        values[index] = static_cast<
+                            typename LayerT::value_type>(
+                            std::to_integer<std::uint8_t>(cell));
+                        resolved[index] = true;
+                        --unresolved;
+                    }
+                    // A 0x20 runtime cell contributes nothing; authored
+                    // Placements and the fallback may still resolve it.
+                }
+            }
+        }
+
         // Collect the live Placements into a fixed pointer array and sort the
         // occupied prefix by descending PlacementId. The rule follows stable
         // identity, not array slot order, and needs no dynamic container.
@@ -871,9 +988,6 @@ private:
             { return a->id() > b->id(); });
 
         std::array<bool, plane_cells> candidate {};
-        std::array<std::uint32_t, plane_cells> local_x {};
-        std::array<std::uint32_t, plane_cells> local_y {};
-        std::byte cell {};
 
         for (std::size_t i = 0; i < ordered_count && unresolved > 0; ++i)
         {
@@ -1231,15 +1345,13 @@ private:
     const storage::Storage& m_authored_storage;
 
     /*
-     * Runtime storage: the writable persistence for future
-     * runtime/materialised world state. Borrowed; the object outlives the
-     * Map.
+     * Runtime storage: the writable persistence for runtime/materialised
+     * world state. Borrowed; the object outlives the Map.
      *
-     * Deliberately unused by resolution for now: it is stored to pin the
-     * constructor and lifetime seam required by the future runtime
-     * reader/write-back slice (LAYER_STORAGE_MODEL.md). No code path opens,
-     * reads or writes it yet, and the same Storage object may legitimately
-     * fill both roles.
+     * Resolution reads the bound runtime overlay through it inside
+     * resolve_chunk<LayerT>(); Map still writes it only when a write-back
+     * slice exists (LAYER_STORAGE_MODEL.md). The same Storage object may
+     * legitimately fill both roles.
      */
     storage::Storage& m_runtime_storage;
 
@@ -1251,11 +1363,12 @@ private:
      *
      * Borrowed; the backing records outlive the Map. Zero bindings means
      * this Map currently has no persistent runtime overlay source for those
-     * layers, not that the layers are unsupported.
+     * layers, not that the layers are unsupported; a present binding is
+     * consulted by reads and must open and validate.
      *
-     * Deliberately unused by any read or write path for now: it pins the
-     * identity seam required by the future runtime reader/write-back slice
-     * (LAYER_STORAGE_MODEL.md) without performing any I/O yet.
+     * resolve_chunk<LayerT>() looks the layer's binding up and reads the
+     * bound source through m_runtime_storage. No write path exists yet
+     * (LAYER_STORAGE_MODEL.md).
      */
     std::span<const RuntimeLayerBinding> m_runtime_layers;
 

@@ -5,8 +5,8 @@ This file describes **what exists now**, not the final architecture.
 Source baseline reviewed before this update:
 
 ```text
-811104575bd3c3a38cda24b6ef525cb7bd3aaaaf
-world: separate authored and runtime storage roles
+dea40307677dc8bb2401988f6ef02125ecf8b672
+world: pin runtime layer source identity
 ```
 
 For intended architecture, read `dev-docs/DESIGN_STATE.md`,
@@ -75,11 +75,12 @@ tests/world/test_map_at.cpp
 tests/world/test_map_storage_roles.cpp
 tests/world/test_runtime_layer_source.cpp
 tests/world/test_map_runtime_catalogue.cpp
+tests/world/test_map_runtime_overlay.cpp
 
 tests/platform/storage/test_storage_filesystem.cpp
 ```
 
-`Tile`, `Chunk`, `Cache`, the streaming layer source reader, the authored Patch/source geometry contract, the Placement coordinate transform, the live Placement lifecycle on Map, filesystem storage, and the checked Map point access (`Map::value<LayerT>()` and `Map::at()`) now have behavioural GoogleTests. The terminal layer fallback contract and the checked Map access result contract keep their compile-time assertions in `tests/world/test_layer_fallback.cpp`, `tests/world/test_map_result.cpp` and the header tripwire, and are now additionally exercised behaviourally through `value<LayerT>()` in `tests/world/test_map_value.cpp` and `at()` in `tests/world/test_map_at.cpp`. The two explicit Map storage roles are pinned by focused behavioural tests in `tests/world/test_map_storage_roles.cpp` (authored resolution uses only the authored root, a missing runtime source is irrelevant to current reads, and one Storage object may fill both roles) and by the constructor tripwire in `tests/test_world_headers.cpp`. The runtime layer source identity/geometry contract (one logical runtime overlay source per Map layer, source geometry pinned to the complete Map area, defensive narrow-coordinate comparisons) is pinned by `tests/world/test_runtime_layer_source.cpp`, and the Map runtime binding catalogue (empty and one-binding construction, the old constructor no longer being current, and zero runtime I/O today even when a runtime source is bound) is pinned by `tests/world/test_map_runtime_catalogue.cpp`.
+`Tile`, `Chunk`, `Cache`, the streaming layer source reader, the authored Patch/source geometry contract, the Placement coordinate transform, the live Placement lifecycle on Map, filesystem storage, and the checked Map point access (`Map::value<LayerT>()` and `Map::at()`) now have behavioural GoogleTests. The terminal layer fallback contract and the checked Map access result contract keep their compile-time assertions in `tests/world/test_layer_fallback.cpp`, `tests/world/test_map_result.cpp` and the header tripwire, and are now additionally exercised behaviourally through `value<LayerT>()` in `tests/world/test_map_value.cpp` and `at()` in `tests/world/test_map_at.cpp`. The two explicit Map storage roles are pinned by focused behavioural tests in `tests/world/test_map_storage_roles.cpp` (authored resolution uses only the authored root, a missing runtime source is not an error while no binding names the layer, and one Storage object may fill both roles) and by the constructor tripwire in `tests/test_world_headers.cpp`. The runtime layer source identity/geometry contract (one logical runtime overlay source per Map layer, source geometry pinned to the complete Map area, defensive narrow-coordinate comparisons) is pinned by `tests/world/test_runtime_layer_source.cpp`, and the Map runtime binding catalogue (empty and one-binding construction, the old constructor no longer being current, a bound runtime cell overriding authored state, and a bound-but-absent runtime source failing the access) is pinned by `tests/world/test_map_runtime_catalogue.cpp`. The implemented runtime overlay read resolution (D-36) is pinned by `tests/world/test_map_runtime_overlay.cpp`: per-cell precedence over authored state and the fallback, space fall-through, mixed cells coexisting in one Chunk, a fully runtime-resolved Chunk skipping broken authored sources, exact `LayerSourceError`/`RuntimeLayerSourceError` propagation, missing-binding versus bound-but-broken behaviour, and residency of resolved Chunks.
 
 The final test-layout rule is still to mirror `src/` under `tests/`. The newer mapping and platform-storage tests already do that; `test_area.cpp`, `test_coord.cpp`, and the all-headers tripwire still live at the test root and can be moved separately.
 
@@ -183,18 +184,18 @@ Its current header is aligned to the new Cache model:
 - supported Layers remain part of the Map type;
 - Cache remains layer-oriented;
 - `Map::at()` is implemented: checked multi-layer world access returning `MapResult<tile_type>` — bounds check first, every supported layer resident in the Map template's declared layer order (fail-fast, exact first error), then Tile packing through `Cache::tile()`; the scalar overload `at(x, y)` forwards to `at(coord_type{x, y})`;
-- `Map::value<LayerT>()` is implemented: layer-specific checked access returning `MapResult<LayerT::value_type>` — bounds check first, canonical chunk residency, chunk-plane resolution (authored Placements in descending `PlacementId` order, then the terminal fallback), and installation through `Cache::fill<LayerT>()`;
+- `Map::value<LayerT>()` is implemented: layer-specific checked access returning `MapResult<LayerT::value_type>` — bounds check first, canonical chunk residency, chunk-plane resolution (runtime overlay when a binding names the layer, then authored Placements in descending `PlacementId` order, then the terminal fallback), and installation through `Cache::fill<LayerT>()`;
 - the live Placement lifecycle is implemented: `place()` (both overloads) returns `MapPlacementResult = std::expected<PlacementId, MapPlacementError>`; unknown Patch is checked before capacity; successful creation assigns the next stable `PlacementId`, starting at 1 and increasing monotonically, never reused;
 - public lookup is const-only (`placement(PlacementId)` returns a bounded pointer, `nullptr` for unknown ids); `set_position()`, `set_rotation()`, `set_reflection()`, and `set_orientation()` return `bool`, reject unknown ids, and mutate only when the requested value actually differs from the current one;
 - any real placement change currently invalidates the whole resident Cache, because transformed Patch coverage does not exist yet (see `dev-docs/DESIGN_DECISIONS.md`, D-33);
-- Map borrows two explicit storage roles: `const landor::storage::Storage&` for the authored read source (immutable; Map never writes it) and `landor::storage::Storage&` for future runtime persistence (writable; stored because materialisation/write-back must be able to write it); both are the build-selected `landor::storage::Storage` alias (currently `StorageFilesystem`), both are borrowed and outlive the Map, and the same Storage object may legitimately fill both roles;
+- Map borrows two explicit storage roles: `const landor::storage::Storage&` for the authored read source (immutable; Map never writes it) and `landor::storage::Storage&` for the runtime overlay read source (writable type so future materialisation/write-back can write it; read-only from Map's perspective until then); both are the build-selected `landor::storage::Storage` alias (currently `StorageFilesystem`), both are borrowed and outlive the Map, and the same Storage object may legitimately fill both roles;
 - Map also borrows the runtime layer binding catalogue: `std::span<const RuntimeLayerBinding>` scoped to this Map instance, where a binding `{ layer, source }` identifies the logical runtime/materialised overlay source of `(Map::id(), layer)` in the runtime storage role (see `src/world/runtime_layer_source.hpp`, D-35); the constructor asserts that every binding names a layer supported by the Map type and that no LayerId appears twice in the span — a duplicate is invalid configuration, not a precedence case; zero bindings means this Map currently has no persistent runtime overlay source for those layers, not that the layer is unsupported;
-- existing authored resolution (`open_layer_source()`/`read_cells()` inside `resolve_chunk<LayerT>()`) uses the authored storage only; the runtime storage is stored and the binding catalogue is borrowed, but neither is consulted by any read or write yet, and no runtime overlay resolution exists yet;
-- Map carries an explicit typed terminal fallback dependency: a `FallbackT` template parameter constrained by `LayerFallbackProvider<FallbackT, CoordT, Layers...>` (see `src/world/layer_fallback.hpp`). The provider is queried per layer and per world coordinate and returns exactly `LayerT::value_type`; it represents procedural baseline generation or a fixed layer default behind one small operation. Map borrows one provider object as `const` and owns it not, and exposes no accessor for it. `value<LayerT>()` now queries the provider per layer and per unresolved in-Map cell during chunk-plane resolution; no runtime/materialized override sits above the authored Placements yet.
+- authored resolution (`open_layer_source()`/`read_cells()` inside `resolve_chunk<LayerT>()` for Placement sources) uses the authored storage only, and runtime overlay resolution (D-36) uses the runtime storage only: when a runtime binding names the layer, the bound source is opened and validated once per missing layer Chunk and its non-space cells resolve their cells ahead of authored state; when no binding names the layer the runtime storage is never inspected; no write path exists yet;
+- Map carries an explicit typed terminal fallback dependency: a `FallbackT` template parameter constrained by `LayerFallbackProvider<FallbackT, CoordT, Layers...>` (see `src/world/layer_fallback.hpp`). The provider is queried per layer and per world coordinate and returns exactly `LayerT::value_type`; it represents procedural baseline generation or a fixed layer default behind one small operation. Map borrows one provider object as `const` and owns it not, and exposes no accessor for it. `value<LayerT>()` and `at()` query the provider per layer and per unresolved in-Map cell during chunk-plane resolution, behind both the runtime overlay (D-36) and the authored Placement chain (D-34).
 
-The checked Map access result/error contract is now pinned in `src/world/map_result.hpp`: `Map::at()` returns `MapResult<tile_type>` and `Map::value<LayerT>()` returns `MapResult<LayerT::value_type>`, with `MapError = std::variant<MapErrorCode, LayerSourceError, AuthoredLayerSourceError>`. Map-local failures are `OutOfBounds` (the coordinate is outside the Map, detected before Cache/Storage work) and `CacheFull` (the bounded Cache cannot accept another spatial slot and has no eviction policy yet); source failures keep their exact lower-level domains, `LayerSourceError` and `AuthoredLayerSourceError`. `storage::Error` never surfaces directly; the layer source reader already maps Storage failures to `LayerSourceError::StorageFailed`.
+The checked Map access result/error contract is now pinned in `src/world/map_result.hpp`: `Map::at()` returns `MapResult<tile_type>` and `Map::value<LayerT>()` returns `MapResult<LayerT::value_type>`, with `MapError = std::variant<MapErrorCode, LayerSourceError, AuthoredLayerSourceError, RuntimeLayerSourceError>`. Map-local failures are `OutOfBounds` (the coordinate is outside the Map, detected before Cache/Storage work) and `CacheFull` (the bounded Cache cannot accept another spatial slot and has no eviction policy yet); source failures keep their exact lower-level domains: the exact `LayerSourceError` for `.layer` parser/read failures in any source role, the exact `AuthoredLayerSourceError` for authored Patch/source geometry failures, and the exact `RuntimeLayerSourceError` for runtime Map/source geometry failures (D-36). `storage::Error` never surfaces directly; the layer source reader already maps Storage failures to `LayerSourceError::StorageFailed`.
 
-The single-layer checked access path is now implemented: `value<LayerT>()` ensures canonical chunk residency by resolving a complete layer plane — opening each relevant authored source once per Placement, validating it once against the Patch, reading the relevant cells through the streaming reader, and falling back for the remaining in-Map cells — and installs the plane through `Cache::fill<LayerT>()`. Authored precedence is pinned: a higher `PlacementId` has higher precedence, so a later successful placement overlays an earlier one (see `dev-docs/DESIGN_DECISIONS.md`, D-34). The checked multi-layer access `Map::at()` is now implemented on the same seam: the bounds check happens before any Cache population, Storage read, authored-source opening or fallback call; the non-template `ensure_resident()` then walks the supported layers in the Map template's declared order (not sorted by `LayerId`), resolves only the missing ones, and fails fast, returning the exact first `MapError` unchanged; on success `Cache::tile()` packs the owned `Tile` value.
+The single-layer checked access path is now implemented: `value<LayerT>()` ensures canonical chunk residency by resolving a complete layer plane — first, when a runtime binding names the layer, opening the bound runtime source once and validating it once against the complete Map area and reading the unresolved in-Map cells from it (non-space resolves the cell, space leaves it unresolved); then opening each relevant authored source once per Placement, validating it once against the Patch, and reading the relevant cells through the streaming reader; and finally falling back for the remaining in-Map cells — and installs the plane through `Cache::fill<LayerT>()`. Authored precedence is pinned: a higher `PlacementId` has higher precedence, so a later successful placement overlays an earlier one (see `dev-docs/DESIGN_DECISIONS.md`, D-34). The checked multi-layer access `Map::at()` is now implemented on the same seam: the bounds check happens before any Cache population, Storage read, authored-source opening or fallback call; the non-template `ensure_resident()` then walks the supported layers in the Map template's declared order (not sorted by `LayerId`), resolves only the missing ones, and fails fast, returning the exact first `MapError` unchanged; on success `Cache::tile()` packs the owned `Tile` value.
 
 ### Runtime layer sources
 
@@ -228,9 +229,20 @@ coordinate type first.
 
 Map carries the catalogue as a borrowed `std::span<const RuntimeLayerBinding>`
 constructor parameter with the supported/unique-layer precondition asserted in
-the constructor. No current read or write path consults the catalogue yet:
-resolution still reads authored Placements and the fallback only, and runtime
-sources are still not read or written.
+the constructor. Checked reads now consult the catalogue through the private
+`Map::runtime_binding<LayerT>()` seam (D-36): a non-space runtime cell is the
+authoritative current world value for its cell and outranks every authored
+Placement and the fallback; a space runtime cell (`0x20`) contributes nothing,
+so the cell continues to authored Placements and then to the fallback. A
+missing binding is normal absence (no runtime overlay for that layer);
+a present binding whose source cannot be opened, parsed or validated is a
+checked-access failure that propagates the exact `LayerSourceError` or
+`RuntimeLayerSourceError` instead of falling through. For one missing layer
+Chunk the bound runtime source is opened and validated exactly once, before
+any per-cell reading, and when the runtime overlay resolves every logical
+cell of the Chunk no authored source is opened and the fallback is never
+queried. No write path exists yet: runtime sources are read-only from Map's
+perspective, and no mutation, dirty state or write-back is implemented.
 
 ## Authored-world contracts
 
@@ -262,7 +274,7 @@ Version 1.0 uses:
 
 Metadata remains extensible; future layer-specific records are explicitly possible but not defined yet. Sparse coordinate-record data is also deferred rather than included in version 1.0.
 
-A minimal streaming reader now implements this contract in `src/world/layer_source.hpp`: bounded incremental metadata parsing, direct cell addressing, and bounded single-row cell reads through the Storage contract. Non-empty reads also validate that requested cell bytes contain no structural LF and that the touched row ends with LF, without scanning untouched rows. Opening never loads or copies the complete source, and whole-file structural scanning is not performed. Cache/Map integration and runtime write-back are still pending.
+A minimal streaming reader now implements this contract in `src/world/layer_source.hpp`: bounded incremental metadata parsing, direct cell addressing, and bounded single-row cell reads through the Storage contract. Non-empty reads also validate that requested cell bytes contain no structural LF and that the touched row ends with LF, without scanning untouched rows. Opening never loads or copies the complete source, and whole-file structural scanning is not performed. Cache/Map integration exists for reads; runtime write-back is still pending.
 
 The generic reader stays Patch-unaware. The dense v1 Patch/source geometry contract is validated by the separate bridge header `src/world/authored_layer_source.hpp`, which takes an already-parsed layout, performs no Storage I/O, and carries no source-identity semantics (no LayerId/SourceId/backend/share concerns).
 
@@ -348,7 +360,6 @@ The newer tests mirror the source tree, while the older geometry tests still liv
 
 The following are not implemented and should not be invented as collateral work:
 
-- runtime/materialized override precedence above authored Placements (runtime source identity and geometry are now pinned by D-35; authored precedence itself is pinned by D-34);
 - cache replacement policy;
 - dirty-state representation;
 - write-back timing;
@@ -361,7 +372,7 @@ The following are not implemented and should not be invented as collateral work:
 
 A sensible next sequence from the current tree is:
 
-1. pin runtime/materialized override precedence once that state exists (the runtime source identity/geometry is already pinned by D-35; the checked single-layer `value<LayerT>()` slice and the checked multi-layer `Map::at()` are now both implemented and tested);
+1. fuse Map mutation, Cache mutation, dirty tracking and dirty-safe invalidation into one coherent change (the checked single-layer `value<LayerT>()` slice, the checked multi-layer `Map::at()`, and the runtime overlay read resolution are now implemented and tested, D-36);
 2. add replacement/write-back policy only after the fixed-capacity no-eviction path is working;
 3. introduce `Region` only when a simulation needs an algorithmic working-area API;
 4. separately finish mechanical policy alignment in CMake, enum spelling, and test layout.

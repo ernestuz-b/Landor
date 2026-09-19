@@ -2,6 +2,7 @@
 
 #include "authored_layer_source.hpp"
 #include "layer_source.hpp"
+#include "runtime_layer_source.hpp"
 
 #include <cstdint>
 #include <expected>
@@ -36,8 +37,12 @@ enum class MapErrorCode : std::uint8_t
  * preserve their own exact lower-level error domains instead of being
  * flattened into one large Map enum:
  *
- *   - LayerSourceError: the exact `.layer` parse/read error;
- *   - AuthoredLayerSourceError: the exact Patch/source compatibility error.
+ *   - LayerSourceError: the exact `.layer` parse/read error, regardless of
+ *     the source role that produced it (authored or runtime);
+ *   - AuthoredLayerSourceError: the exact authored Patch/source geometry
+ *     compatibility error;
+ *   - RuntimeLayerSourceError: the exact runtime Map/source geometry
+ *     compatibility error (D-35/D-36).
  *
  * storage::Error never appears directly in this variant: the layer source
  * reader already maps Storage failures to LayerSourceError::StorageFailed,
@@ -46,7 +51,8 @@ enum class MapErrorCode : std::uint8_t
 using MapError = std::variant<
     MapErrorCode,
     LayerSourceError,
-    AuthoredLayerSourceError>;
+    AuthoredLayerSourceError,
+    RuntimeLayerSourceError>;
 
 
 /**

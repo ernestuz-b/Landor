@@ -68,16 +68,21 @@ TEST(MapResult, ErrorVariantPreservesExactlyThePinnedDomains)
     using landor::geo::LayerSourceError;
     using landor::geo::MapError;
     using landor::geo::MapErrorCode;
+    using landor::geo::RuntimeLayerSourceError;
 
-    // MapError carries exactly three alternatives, in this order.
-    static_assert(std::variant_size_v<MapError> == 3);
+    // MapError carries exactly four alternatives, in this order.
+    static_assert(std::variant_size_v<MapError> == 4);
     static_assert(std::is_same_v<std::variant_alternative_t<0, MapError>, MapErrorCode>);
     static_assert(std::is_same_v<std::variant_alternative_t<1, MapError>, LayerSourceError>);
     static_assert(std::is_same_v<std::variant_alternative_t<2, MapError>, AuthoredLayerSourceError>);
+    static_assert(std::is_same_v<std::variant_alternative_t<3, MapError>, RuntimeLayerSourceError>);
 
     // The lower domains keep their exact vocabulary and no flattened
-    // duplicate enum stands in for them; storage::Error never appears
-    // directly in MapError.
+    // duplicate enum stands in for them: LayerSourceError covers .layer
+    // parse/read failures regardless of source role, AuthoredLayerSourceError
+    // covers authored Patch/source geometry failures, and
+    // RuntimeLayerSourceError covers runtime Map/source geometry failures.
+    // storage::Error never appears directly in MapError.
     SUCCEED();
 }
 
@@ -110,6 +115,20 @@ TEST(MapResult, EachErrorAlternativeStoresAndRetrieves)
         EXPECT_TRUE(std::holds_alternative<landor::geo::AuthoredLayerSourceError>(error));
         EXPECT_EQ(std::get<landor::geo::AuthoredLayerSourceError>(error),
                   landor::geo::AuthoredLayerSourceError::DimensionMismatch);
+    }
+
+    {
+        landor::geo::MapError error = landor::geo::RuntimeLayerSourceError::DimensionMismatch;
+        EXPECT_TRUE(std::holds_alternative<landor::geo::RuntimeLayerSourceError>(error));
+        EXPECT_EQ(std::get<landor::geo::RuntimeLayerSourceError>(error),
+                  landor::geo::RuntimeLayerSourceError::DimensionMismatch);
+    }
+
+    {
+        landor::geo::MapError error = landor::geo::RuntimeLayerSourceError::PositionMismatch;
+        EXPECT_TRUE(std::holds_alternative<landor::geo::RuntimeLayerSourceError>(error));
+        EXPECT_EQ(std::get<landor::geo::RuntimeLayerSourceError>(error),
+                  landor::geo::RuntimeLayerSourceError::PositionMismatch);
     }
 }
 

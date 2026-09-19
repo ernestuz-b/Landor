@@ -298,16 +298,18 @@ Overlap resolution is per-layer. A Placement that supplies no value for one laye
 
 The precedence rule belongs in Map, not in Patch, and is pinned to stable Placement identity: a higher `PlacementId` has higher authored precedence, so a later successful placement overlays an earlier one (see `DESIGN_DECISIONS.md`, D-34). The rule follows the monotonic id, not the array-slot order a Placement happens to occupy.
 
-The conceptual resolution order is:
+The implemented resolution order is:
 
 ```text
 resident Cache
-    -> [future runtime/materialized override]
+    -> runtime/materialized overlay
     -> authored Placements, highest PlacementId first
     -> terminal fallback provider (procedural baseline or layer default)
 ```
 
-A Placement declines a cell — resolution then continues downward — when its Patch has no binding for the layer, the world coordinate is outside its transformed Patch, or the authored cell is ASCII space `0x20`. The square-bracketed step is future work: the runtime storage role is stored on Map and the runtime layer binding catalogue is borrowed, but neither is yet consulted by any read or write, and existing authored resolution uses the authored storage role only. The logical identity and geometry behind that step are now pinned (D-35): one logical runtime overlay source per Map layer, covering the complete Map area with `P` = the Map area minimum and `D` = the Map area extent, world-oriented and independent of `CacheChunkSide`.
+The runtime overlay step (D-36) is live in checked reads: when a runtime layer binding names the layer, the bound runtime source is opened and validated once per missing layer Chunk, and every in-Map cell whose runtime byte is non-space resolves to that byte, authoritative over all authored Placements and the fallback. A space runtime cell (`0x20`) contributes nothing, so the cell continues downward. A missing binding means no runtime overlay exists for that layer, so authored/fallback behaviour is unchanged; a present binding whose source cannot be opened, parsed or validated is a checked-access error. The runtime source identity and geometry are pinned by D-35: one logical runtime overlay source per Map layer, covering the complete Map area with `P` = the Map area minimum and `D` = the Map area extent, world-oriented and independent of `CacheChunkSide`.
+
+A Placement declines a cell — resolution then continues downward — when its Patch has no binding for the layer, the world coordinate is outside its transformed Patch, or the authored cell is ASCII space `0x20`.
 
 Missing canonical Cache layer Chunks are connected to that source-resolution path through the same chunk-plane seam, which now serves both checked point-access paths: `value<LayerT>()` returns one resident layer value, and `at()` ensures every supported layer is resident in the Map template's declared layer order (fail-fast, returning the exact first `MapError` unchanged), then packs the complete owned `Tile` through `Cache::tile()`. Both validate that the coordinate belongs to the Map before any residency work. No storage format beyond the repository's existing contracts is used.
 
@@ -598,7 +600,6 @@ Mapping-specific details belong in `MAPPING_MODEL.md` and must remain consistent
 The following remain intentionally open:
 
 - final mutation API between simulations and materialized layer state;
-- runtime/materialized override precedence above authored Placements (runtime source identity and geometry are pinned by D-35; authored precedence itself is pinned by D-34);
 - exact source/layer/spatial-coordinate to byte-range mapping where not already defined by a concrete format;
 - Cache replacement policy;
 - dirty-state/write-back policy;
