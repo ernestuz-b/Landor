@@ -198,6 +198,39 @@ read_cells(
     std::span<std::byte> destination);
 
 
+/**
+ * Write consecutive cells into one source row.
+ *
+ * Writes data.size() cells starting at column x of the given row. A
+ * non-empty write issues one one-byte read of the touched row's structural
+ * LF terminator, then one bounded Storage write for exactly the requested
+ * fragment; the fragment never crosses the terminator, so
+ * x + data.size() must not exceed the declared width. Row or column outside
+ * the grid fails with OutOfRange rather than clamping or wrapping.
+ *
+ * This is the byte-level mirror of read_cells(): a LF byte inside the
+ * supplied cell data is rejected with MalformedData before any Storage I/O
+ * is issued (structural in v1, never a cell value), as is a non-LF byte at
+ * the touched row terminator. An empty write succeeds without any Storage
+ * I/O. No bytes outside the requested range are ever written: the touched
+ * row's terminator is read and verified, never written, and the source is
+ * never grown or truncated. Other bytes are literal: ASCII space (0x20) is
+ * a valid no-contribution cell byte and needs no special handling.
+ *
+ * A Storage failure from the terminator read or the cell write maps to
+ * LayerSourceError::StorageFailed.
+ */
+template<storage::StorageBackend Backend>
+[[nodiscard]] std::expected<void, LayerSourceError>
+write_cells(
+    const LayerSourceLayout& layout,
+    Backend& storage,
+    storage::SourceId source,
+    std::uint32_t row,
+    std::uint32_t x,
+    std::span<const std::byte> data);
+
+
 namespace detail
 {
 
@@ -880,6 +913,102 @@ read_cells(
     if (terminator != detail::k_newline)
     {
         return std::unexpected(LayerSourceError::MalformedData);
+    }
+
+    return {};
+}
+
+
+template<storage::StorageBackend Backend>
+[[nodiscard]] std::expected<void, LayerSourceError>
+write_cells(
+    const LayerSourceLayout& layout,
+    Backend& storage,
+    storage::SourceId source,
+    std::uint32_t row,
+    std::uint32_t x,
+    std::span<const std::byte> data)
+{
+    // Subtraction-style bounds, mirroring read_cells(): x + data.size()
+    // would be computed in size_t, which wraps on 32-bit targets.
+    if (row >= layout.height || x > layout.width)
+    {
+        return std::unexpected(LayerSourceError::OutOfRange);
+    }
+
+    if (data.size() > static_cast<std::size_t>(layout.width - x))
+    {
+        return std::unexpected(LayerSourceError::OutOfRange);
+    }
+
+    if (data.empty())
+    {
+        return {};
+    }
+
+    // LF is structural in v1 and can never be a cell value: reject the
+    // offending data before any Storage I/O is issued.
+    for (const std::byte value : data)
+    {
+        if (value == detail::k_newline)
+        {
+            return std::unexpected(LayerSourceError::MalformedData);
+        }
+    }
+
+    const auto cell = layout.cell_offset(x, row);
+    if (!cell)
+    {
+        return std::unexpected(LayerSourceError::OutOfRange);
+    }
+
+    // Validate the structural byte for the touched row before writing
+    // anything. The parsed layout normally guarantees this offset fits
+    // storage::Offset; keep the arithmetic defensive for callers that
+    // construct a LayerSourceLayout directly.
+    const std::uint64_t row_offset =
+        static_cast<std::uint64_t>(row)
+        * static_cast<std::uint64_t>(layout.row_stride);
+    const std::uint64_t max_offset =
+        static_cast<std::uint64_t>(std::numeric_limits<storage::Offset>::max());
+
+    if (row_offset > max_offset
+        || static_cast<std::uint64_t>(layout.data_offset) > max_offset - row_offset)
+    {
+        return std::unexpected(LayerSourceError::Overflow);
+    }
+
+    const std::uint64_t row_start =
+        static_cast<std::uint64_t>(layout.data_offset) + row_offset;
+
+    if (static_cast<std::uint64_t>(layout.width) > max_offset - row_start)
+    {
+        return std::unexpected(LayerSourceError::Overflow);
+    }
+
+    const auto terminator_offset = static_cast<storage::Offset>(
+        row_start + static_cast<std::uint64_t>(layout.width));
+
+    std::byte terminator {};
+    const auto terminator_result = storage.read(
+        source,
+        terminator_offset,
+        std::span<std::byte>(&terminator, 1));
+
+    if (!terminator_result)
+    {
+        return std::unexpected(LayerSourceError::StorageFailed);
+    }
+
+    if (terminator != detail::k_newline)
+    {
+        return std::unexpected(LayerSourceError::MalformedData);
+    }
+
+    const auto result = storage.write(source, *cell, data);
+    if (!result)
+    {
+        return std::unexpected(LayerSourceError::StorageFailed);
     }
 
     return {};

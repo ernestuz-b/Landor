@@ -76,7 +76,7 @@ simulation/game changes resident state
     -> later write-back updates the corresponding runtime-source ranges
 ```
 
-The first half of that flow is implemented (D-37): `Map::set<LayerT>()` mutates one live layer value through the Cache and marks the resident layer plane dirty; the dirty resident value is authoritative for subsequent reads of that Chunk. The write-back half does not exist yet, so a dirty plane cannot be flushed or cleared, and no Storage write happens in any current path.
+Both halves of that flow are implemented: `Map::set<LayerT>()` mutates one live layer value through the Cache and marks the resident layer plane dirty (D-37), and the explicit write-back `Map::flush<LayerT>()` persists exactly the dirty plane's differing cells to the bound runtime source, marking the plane clean only when the whole plane succeeds (D-38). `set<LayerT>()` itself performs no Storage write, and the only path that clears dirt is that explicit write-back.
 
 The Cache therefore mediates simulation state; the files provide persistence/backing storage.
 
@@ -92,7 +92,7 @@ Runtime persistence must consequently identify the live world occurrence or worl
 
 The runtime identity is now pinned (see `DESIGN_DECISIONS.md`, D-35): a runtime source belongs to `(MapId, LayerId)` — one logical runtime overlay source per Map layer — and its geometry is the complete Map area (`P` = Map area minimum, `D` = Map area extent), with source-local `(0, 0)` equal to the Map's minimum world coordinate. The runtime overlay belongs to Map world coordinates, not to the authored object that originally supplied the value: if Fire at a world coordinate changes at runtime, persistence goes through that Map's Fire runtime source, never through `GoodMagePalace.Fire` authored source, and a second placement of the same Patch is unaffected. No Placement or Patch transform participates.
 
-What remains deliberately unpinned is the physical side: the exact runtime filename/naming convention, the exact `SourceId` allocation/registration for that identity, and file creation. They should be defined when the runtime-source manager/write-back path is implemented.
+What remains deliberately unpinned is the physical side: the exact runtime filename/naming convention, the exact `SourceId` allocation/registration for that identity, and file creation. The write-back path exists (D-38) but writes only to already-bound sources; these physical decisions are still open and must not be inferred from it.
 
 The authored filename convention:
 
@@ -146,23 +146,25 @@ The exact creation policy, allocation API, naming, and source registration mecha
 
 ## Dirty state and write-back
 
-Dirty tracking is implemented (D-37) as one sticky bit per resident layer plane per spatial slot: a changed `Cache::set<LayerT>()` dirties the whole plane, a same-value set does not, and once dirty a plane stays dirty until the Cache is destroyed. The dirty value is authoritative while resident, `fill()` refuses to overwrite a dirty target plane, and both invalidation forms refuse atomically — changing nothing — when they would discard a dirty resident plane.
+Dirty tracking is implemented (D-37) as one sticky bit per resident layer plane per spatial slot: a changed `Cache::set<LayerT>()` dirties the whole plane, a same-value set does not, and once dirty a plane stays dirty until the explicit write-back clears it (D-38) or the Cache is destroyed. The dirty value is authoritative while resident, `fill()` refuses to overwrite a dirty target plane, and both invalidation forms refuse atomically — changing nothing — when they would discard a dirty resident plane.
 
-Write-back is still open. The intended direction is:
+Write-back is implemented (D-38) as the explicit `Map::flush<LayerT>()`:
 
 ```text
 simulation/game mutation
     -> current resident layer state becomes dirty
     -> dirty state remains authoritative while resident
-    -> write-back persists it to a runtime source
+    -> flush re-resolves the fresh backing answer and compares it with the live plane
+    -> only the differing cells are written to the bound runtime source
+    -> the plane is marked clean only when the whole plane succeeded
     -> authored source remains untouched
 ```
 
-Write-back should operate on the required runtime-source ranges rather than requiring the complete layer to be assembled or rewritten in memory.
+Flush operates on the required runtime-source ranges (adjacent differing cells of one row coalesced into one bounded `write_cells()` write) rather than requiring the complete layer to be assembled or rewritten in memory, and a dirty plane whose live state has net returned to its backing answer is cleared without any write. Flush does not create runtime sources, does not run automatically on mutation, and has no cross-layer transaction: `flush_all()` walks the declared layer order and fails fast.
 
 Eviction must not discard dirty state. Before a dirty layer region can be evicted, its required runtime state must be safely persisted or eviction must fail/defer. With the current no-eviction Cache this is implemented as atomic refusal: dirty-safe `invalidate(area)` and `invalidate_all()` fail and change nothing rather than discard a dirty plane, and the Placement lifecycle surfaces the refusal as its own `DirtyState` management error.
 
-The dirty-state granularity is pinned by D-37 (per resident layer plane per spatial slot). The write-back granularity — cell, range, Chunk, layer plane, or another measured choice — is not pinned yet and may differ from the dirty-state granularity.
+The dirty-state granularity is pinned by D-37 (per resident layer plane per spatial slot). The implemented write-back granularity matches the dirty unit: one layer plane (one canonical Chunk) per flush step, persisting only the cells that differ within it.
 
 ## Storage separation
 
@@ -188,9 +190,9 @@ storage::Storage&                      runtime storage
 std::span<const RuntimeLayerBinding>   runtime layers
 ```
 
-Resolution is role-separated: authored reads (`open_layer_source()` and `read_cells()` for Placement sources inside `Map::resolve_chunk<LayerT>()`) receive the authored reference, and runtime overlay reads receive the runtime reference, so each role is only ever touched for its own sources. Map never writes to either role in the current slice: runtime sources are read-only from Map's perspective until write-back exists. Runtime overlay read resolution is implemented (D-36): for one missing layer Chunk the bound runtime source is opened and validated exactly once, then unresolved in-Map cells are read one at a time; when no binding names the layer the runtime storage is never inspected. Runtime `SourceId` allocation/registration and write-back do not exist yet; the `SourceId` a runtime source carries is supplied by the binding catalogue.
+Resolution is role-separated: authored reads (`open_layer_source()` and `read_cells()` for Placement sources inside `Map::resolve_chunk<LayerT>()`) receive the authored reference, and runtime overlay reads receive the runtime reference, so each role is only ever touched for its own sources. Map writes only through the runtime role: the explicit write-back `flush<LayerT>()` (D-38) persists a dirty plane's differing cells to the bound runtime source, and the authored role is never written. Runtime overlay read resolution is implemented (D-36): for one missing layer Chunk the bound runtime source is opened and validated exactly once, then unresolved in-Map cells are read one at a time; when no binding names the layer the runtime storage is never inspected. Runtime `SourceId` allocation/registration still does not exist; the `SourceId` a runtime source carries — for both read resolution and write-back — is supplied by the binding catalogue.
 
-The binding catalogue drives read resolution: a binding `{ layer, source }` names the logical runtime source of `(Map::id(), layer)` in the runtime storage role, and the Map constructor asserts that every binding names a layer supported by the Map type and that no `LayerId` appears twice (D-35). Checked reads consult it through the private `Map::runtime_binding<LayerT>()` seam; no write path consults it yet.
+The binding catalogue drives read resolution: a binding `{ layer, source }` names the logical runtime source of `(Map::id(), layer)` in the runtime storage role, and the Map constructor asserts that every binding names a layer supported by the Map type and that no `LayerId` appears twice (D-35). Checked reads consult it through the private `Map::runtime_binding<LayerT>()` seam, and the write-back consults the same seam before persisting a dirty plane (D-38).
 
 Both references currently use the build-selected `storage::Storage` type. That is current source reality, not a permanent architectural prohibition against heterogeneous authored/runtime backing implementations on a concrete target.
 

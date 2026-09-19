@@ -6,6 +6,7 @@
 #include "layer.hpp"
 #include "layer_fallback.hpp"
 #include "layer_source.hpp"
+#include "map_persistence.hpp"
 #include "map_result.hpp"
 #include "orientation.hpp"
 #include "patch.hpp"
@@ -218,9 +219,11 @@ using MapPlacementMutationResult =
  * small target. Chunk-plane resolution consults both roles when both are
  * live for a layer: authored sources are opened and read through the
  * authored reference, and the bound runtime overlay is opened and read
- * through the runtime reference (see resolve_chunk<LayerT>()). Map still
- * writes neither role: runtime SourceId allocation, registration, file
- * creation and write-back are future work (see LAYER_STORAGE_MODEL.md).
+ * through the runtime reference (see resolve_chunk<LayerT>()). Map writes
+ * the runtime role only through the explicit write-back flush<LayerT>()
+ * (D-38); the authored role is never written. Runtime SourceId allocation,
+ * registration and file creation for new overlays remain open (see
+ * LAYER_STORAGE_MODEL.md).
  *
  * Storage abstracts where those bytes physically live.
  *
@@ -229,12 +232,14 @@ using MapPlacementMutationResult =
  * resident, mutates the resident Cache value and marks that resident layer
  * plane dirty (D-37). The dirty resident value is authoritative for
  * subsequent reads of that Chunk without rereading runtime, authored or
- * fallback state. No Storage write happens: a dirty plane cannot yet be
- * persisted, and dirty-safe invalidation refuses any operation that would
- * discard it until a write-back slice exists.
+ * fallback state. No Storage write happens here: dirty state is persisted
+ * only by the explicit write-back flush<LayerT>() (D-38), and dirty-safe
+ * invalidation refuses any operation that would discard a dirty plane in
+ * the meantime.
  *
- * Procedurally supplied regions may be materialised lazily when first changed.
- * The exact replacement and write-back policy lives below this interface.
+ * Procedurally supplied regions may be materialised lazily when first
+ * changed. The replacement policy remains open; write-back is the explicit
+ * flush<LayerT>() of D-38 and never happens automatically.
  *
  *
  * Runtime layer bindings
@@ -267,8 +272,11 @@ using MapPlacementMutationResult =
  * still-unresolved in-Map cells from it. A non-space runtime cell is
  * authoritative over all authored Placements and the fallback (D-36); a
  * space runtime cell contributes nothing and resolution continues downward.
- * No write path exists yet: Map only reads the runtime role, and SourceId
- * allocation, registration and file creation remain open (see
+ * The write path is the explicit write-back flush<LayerT>() (D-38): it
+ * persists a
+ * dirty plane through the bound runtime source, writing only the cells that
+ * differ from freshly resolved backing state. SourceId allocation,
+ * registration and file creation for new overlays remain open (see
  * LAYER_STORAGE_MODEL.md).
  *
  *
@@ -303,10 +311,10 @@ using MapPlacementMutationResult =
  * and therefore succeeds even while dirty state exists. Creation order is
  * deterministic: PatchId validation, then capacity, then the invalidation,
  * and only then the PlacementId assignment and Placement construction, so a
- * refused invalidation consumes no PlacementId. Until a write-back slice can
- * flush dirty planes first, Placement changes cannot proceed over dirty
- * state; once transformed coverage exists, Map can narrow invalidation to
- * the affected areas.
+ * refused invalidation consumes no PlacementId. Placement changes cannot
+ * proceed over dirty state until the caller flushes the dirty planes first
+ * through Map's explicit write-back (D-38); once transformed coverage
+ * exists, Map can narrow invalidation to the affected areas.
  *
  * Story systems do not belong here. They refer to PlacementIds through
  * world-facing Place objects; Map only deals with geometry and spatial state.
@@ -567,9 +575,10 @@ public:
      * without creating dirty state; a plane that is already dirty stays
      * dirty. A layer does not need a runtime binding to acquire live state:
      * a missing binding only means there is no persistent runtime source
-     * yet, and the dirty plane simply cannot be persisted until a
-     * write-back slice exists. Dirty-safe invalidation keeps it from being
-     * discarded in the meantime.
+     * yet, and a dirty plane that genuinely differs from its backing state
+     * cannot be persisted until a binding exists (D-38). Dirty-safe
+     * invalidation keeps the dirty plane from being discarded in the
+     * meantime.
      *
      * No Storage write happens here, and dirty state is not a failure of
      * this operation. Failure carries the exact MapError from the seam that
@@ -595,6 +604,305 @@ public:
         }
 
         m_cache.template set<LayerT>(position, value);
+
+        return {};
+    }
+
+
+    /**
+     * Explicit write-back for one supported layer (D-38).
+     *
+     * This is the only dirty-clearing path beside destruction, and it is
+     * never called automatically by set(), placement or resolution
+     * operations. The procedure, per dirty resident LayerT plane:
+     *
+     *   1. The dirty LayerT Chunks are collected through Cache's
+     *      dirty_chunks<LayerT>() into fixed-capacity stack storage; the
+     *      operation performs no heap allocation.
+     *   2. Each backing plane is re-resolved directly through
+     *      resolve_chunk<LayerT>() — never through the dirty resident
+     *      plane — so the comparison target is the current fresh answer of
+     *      the runtime overlay, authored Placements and fallback for that
+     *      Chunk.
+     *   3. The live plane is compared with the fresh backing answer over
+     *      the logical in-Map cells only, ignoring cache padding exactly
+     *      like normal resolution.
+     *   4. When no cell differs, the live state has net returned to its
+     *      backing answer: the plane is marked clean through
+     *      mark_clean<LayerT>() without any write, binding lookup or
+     *      Storage I/O.
+     *   5. Otherwise the layer's runtime binding is required. A missing
+     *      binding fails the flush with
+     *      MapPersistenceErrorCode::MissingRuntimeBinding and leaves the
+     *      plane dirty and authoritative. A present binding is opened
+     *      exactly once per flush<LayerT>() call through
+     *      open_layer_source() and validated once against the Map area
+     *      through validate_runtime_layer_source(), and that parsed layout
+     *      is reused for the remaining dirty Chunks of the call.
+     *   6. Every differing live value is preflighted before any write: a
+     *      value that cannot be stored as a version 1.0 runtime
+     *      contribution byte (ASCII space 0x20 means "no contribution" and
+     *      LF 0x0A is structural, so neither can express an override) fails
+     *      the flush with MapPersistenceErrorCode::UnencodableValue, writes
+     *      nothing for that plane and leaves the plane dirty.
+     *   7. Only the differing cells are then persisted through
+     *      write_cells(): adjacent differing cells of one row are
+     *      coalesced into bounded writes, and the world-to-source-local
+     *      translation uses wide signed intermediates throughout.
+     *   8. The plane is marked clean only after the whole plane write
+     *      succeeds; any lower-level failure leaves it dirty and
+     *      authoritative.
+     *
+     * Resolution failures carry their exact lower-level error domains:
+     * LayerSourceError, AuthoredLayerSourceError or RuntimeLayerSourceError.
+     * No bounds check belongs here (the coordinates derive from resident
+     * chunk geometry) and no MapErrorCode can occur, so the result is the
+     * dedicated MapPersistenceResult of map_persistence.hpp, not a MapError.
+     */
+    template<Layer LayerT>
+        requires (std::same_as<LayerT, Layers> || ...)
+    [[nodiscard]] MapPersistenceResult
+    flush()
+    {
+        // Step 1: the fixed-capacity dirty enumeration; no heap allocation.
+        std::array<typename cache_type::chunk_type, CacheCapacity> dirty {};
+        const std::size_t dirty_count =
+            m_cache.template dirty_chunks<LayerT>(dirty);
+
+        // Steps 2..7 are deferred lazily: a flush with no dirty plane needs
+        // no binding, no source and no Storage I/O.
+        const RuntimeLayerBinding* binding = nullptr;
+        std::optional<LayerSourceLayout> layout;
+
+        for (std::size_t i = 0; i < dirty_count; ++i)
+        {
+            const auto& chunk = dirty[i];
+
+            // Step 2: the fresh backing answer is resolved directly, never
+            // through the dirty resident plane.
+            std::array<typename LayerT::value_type,
+                       CacheChunkSide * CacheChunkSide>
+                backing {};
+            const auto resolved = resolve_chunk<LayerT>(chunk, backing);
+            if (!resolved)
+            {
+                return std::unexpected(persistence_error(resolved.error()));
+            }
+
+            // Step 3: compare over the logical in-Map cells only, exactly
+            // like normal resolution ignores the cache padding.
+            bool differs = false;
+            for (std::uint32_t y = 0; y < CacheChunkSide && !differs; ++y)
+            {
+                for (std::uint32_t x = 0; x < CacheChunkSide && !differs; ++x)
+                {
+                    const auto world = chunk_cell_world(chunk, x, y);
+                    if (!world || !m_area.contains(*world))
+                    {
+                        continue;
+                    }
+
+                    if (m_cache.template value<LayerT>(*world)
+                        != backing[y * CacheChunkSide + x])
+                    {
+                        differs = true;
+                    }
+                }
+            }
+
+            // Step 4: live state has net returned to its backing answer, so
+            // the plane becomes clean without any write, binding or I/O.
+            if (!differs)
+            {
+                m_cache.template mark_clean<LayerT>(chunk);
+                continue;
+            }
+
+            // Step 5: a genuine difference needs the bound runtime source.
+            // The binding is looked up once per flush<LayerT>() call...
+            if (binding == nullptr)
+            {
+                binding = runtime_binding<LayerT>();
+                if (binding == nullptr)
+                {
+                    return std::unexpected(
+                        MapPersistenceErrorCode::MissingRuntimeBinding);
+                }
+
+                // ...and the source is opened and validated once, then the
+                // parsed layout is reused for the remaining dirty Chunks
+                // of this call.
+                const auto opened =
+                    open_layer_source(m_runtime_storage, binding->source);
+                if (!opened)
+                {
+                    return std::unexpected(opened.error());
+                }
+
+                const auto validated =
+                    validate_runtime_layer_source(m_area, *opened);
+                if (!validated)
+                {
+                    return std::unexpected(validated.error());
+                }
+
+                layout = *opened;
+            }
+
+            // Step 6: preflight the differing live values before any write:
+            // a value that cannot be stored as a v1 runtime contribution
+            // aborts the plane without touching the source.
+            for (std::uint32_t y = 0; y < CacheChunkSide; ++y)
+            {
+                for (std::uint32_t x = 0; x < CacheChunkSide; ++x)
+                {
+                    const auto world = chunk_cell_world(chunk, x, y);
+                    if (!world || !m_area.contains(*world))
+                    {
+                        continue;
+                    }
+
+                    const auto live =
+                        m_cache.template value<LayerT>(*world);
+
+                    if (live != backing[y * CacheChunkSide + x]
+                        && !has_contribution(
+                            std::byte{static_cast<unsigned char>(live)}))
+                    {
+                        return std::unexpected(
+                            MapPersistenceErrorCode::UnencodableValue);
+                    }
+                }
+            }
+
+            // Step 7: persist exactly the differing cells, coalescing
+            // adjacent differing cells of one row into bounded writes. The
+            // world-to-source-local translation stays in wide signed
+            // intermediates throughout.
+            std::array<std::byte, CacheChunkSide> run {};
+            std::size_t run_size = 0;
+            std::int64_t run_origin_x = 0;
+
+            auto finish_run = [&](std::uint32_t run_row)
+                -> std::optional<MapPersistenceError>
+            {
+                if (run_size == 0)
+                {
+                    return std::nullopt;
+                }
+
+                const auto run_x_local = static_cast<std::uint32_t>(
+                    run_origin_x - static_cast<std::int64_t>(m_area.min().x()));
+
+                const auto written = write_cells(
+                    *layout,
+                    m_runtime_storage,
+                    binding->source,
+                    run_row,
+                    run_x_local,
+                    std::span<const std::byte>(run.data(), run_size));
+
+                if (!written)
+                {
+                    return written.error();
+                }
+
+                run_size = 0;
+                return std::nullopt;
+            };
+
+            const auto min_y = static_cast<std::int64_t>(m_area.min().y());
+
+            for (std::uint32_t y = 0; y < CacheChunkSide; ++y)
+            {
+                const std::int64_t wide_row_y =
+                    static_cast<std::int64_t>(chunk.origin().y())
+                    + static_cast<std::int64_t>(y);
+
+                if (!fits_coord_component(wide_row_y))
+                {
+                    continue; // the whole row lies outside the Map
+                }
+
+                const auto row = static_cast<std::uint32_t>(wide_row_y - min_y);
+
+                for (std::uint32_t x = 0; x < CacheChunkSide; ++x)
+                {
+                    const auto world = chunk_cell_world(chunk, x, y);
+
+                    if (!world || !m_area.contains(*world))
+                    {
+                        // Padding never differs; it terminates any pending
+                        // run.
+                        const auto failed = finish_run(row);
+                        if (failed)
+                        {
+                            return std::unexpected(*failed);
+                        }
+                        continue;
+                    }
+
+                    const auto live = m_cache.template value<LayerT>(*world);
+
+                    if (live == backing[y * CacheChunkSide + x])
+                    {
+                        const auto failed = finish_run(row);
+                        if (failed)
+                        {
+                            return std::unexpected(*failed);
+                        }
+                        continue;
+                    }
+
+                    if (run_size == 0)
+                    {
+                        run_origin_x =
+                            static_cast<std::int64_t>((*world).x());
+                    }
+                    run[run_size++] =
+                        std::byte{static_cast<unsigned char>(live)};
+                }
+
+                const auto failed = finish_run(row);
+                if (failed)
+                {
+                    return std::unexpected(*failed);
+                }
+            }
+
+            // Step 8: only now that the whole plane write has succeeded.
+            m_cache.template mark_clean<LayerT>(chunk);
+        }
+
+        return {};
+    }
+
+
+    /**
+     * Explicit write-back for every supported layer (D-38).
+     *
+     * The layers are flushed in the declared template order and the walk
+     * fails fast: when a later layer fails, earlier layers may already be
+     * clean and persisted while the failing layer and every later-declared
+     * layer remain dirty and unprocessed. There is deliberately no
+     * cross-layer transaction.
+     *
+     * See flush<LayerT>() for the per-layer contract and error domains.
+     */
+    [[nodiscard]] MapPersistenceResult
+    flush_all()
+    {
+        MapPersistenceError first_error {};
+
+        // The && fold walks the declared layer order and short-circuits on
+        // the first failure.
+        const bool all_flushed =
+            (true && ... && flush_layer<Layers>(first_error));
+
+        if (!all_flushed)
+        {
+            return std::unexpected(first_error);
+        }
 
         return {};
     }
@@ -1425,6 +1733,55 @@ private:
     }
 
 
+    /**
+     * Carry a resolution failure into the persistence error domain.
+     *
+     * resolve_chunk<LayerT>() can only fail with a lower-level source error
+     * (it never produces a Map-local MapErrorCode), so every failure belongs
+     * to one of the three preserved lower domains and passes through
+     * unchanged.
+     */
+    [[nodiscard]] static MapPersistenceError
+    persistence_error(const MapError& error)
+    {
+        if (const auto* layer_error = std::get_if<LayerSourceError>(&error))
+        {
+            return *layer_error;
+        }
+
+        if (const auto* authored_error =
+            std::get_if<AuthoredLayerSourceError>(&error))
+        {
+            return *authored_error;
+        }
+
+        assert(std::get_if<RuntimeLayerSourceError>(&error) != nullptr);
+
+        return std::get<RuntimeLayerSourceError>(error);
+    }
+
+
+    /**
+     * One step of the multi-layer flush walk (flush_all()): flush one layer
+     * and, on failure, record its exact error so the walk can fail fast in
+     * declared layer order.
+     */
+    template<Layer LayerT>
+        requires (std::same_as<LayerT, Layers> || ...)
+    [[nodiscard]] bool
+    flush_layer(MapPersistenceError& first_error)
+    {
+        const auto layer = flush<LayerT>();
+        if (!layer)
+        {
+            first_error = layer.error();
+            return false;
+        }
+
+        return true;
+    }
+
+
     /// Invalidate cached layer data covering one coordinate.
     [[nodiscard]] bool invalidate(coord_type position) const noexcept
     {
@@ -1445,8 +1802,8 @@ private:
      * Dirty-safe: returns false and changes nothing when a dirty resident
      * layer plane would be discarded. The placement lifecycle relies on the
      * refusal rather than on the invalidation always succeeding; once
-     * transformed coverage and a write-back policy exist, placement changes
-     * must invalidate only the affected areas.
+     * transformed coverage exists, placement changes must invalidate only
+     * the affected areas.
      */
     [[nodiscard]] bool invalidate_all() const noexcept
     {
@@ -1475,9 +1832,9 @@ private:
      * world state. Borrowed; the object outlives the Map.
      *
      * Resolution reads the bound runtime overlay through it inside
-     * resolve_chunk<LayerT>(); Map still writes it only when a write-back
-     * slice exists (LAYER_STORAGE_MODEL.md). The same Storage object may
-     * legitimately fill both roles.
+     * resolve_chunk<LayerT>(); write-back writes through it only through
+     * the explicit flush<LayerT>() (D-38, see LAYER_STORAGE_MODEL.md). The
+     * same Storage object may legitimately fill both roles.
      */
     storage::Storage& m_runtime_storage;
 
@@ -1493,8 +1850,9 @@ private:
      * consulted by reads and must open and validate.
      *
      * resolve_chunk<LayerT>() looks the layer's binding up and reads the
-     * bound source through m_runtime_storage. No write path exists yet
-     * (LAYER_STORAGE_MODEL.md).
+     * bound source through m_runtime_storage. The write path consults it
+     * through the explicit write-back flush<LayerT>() (D-38, see
+     * LAYER_STORAGE_MODEL.md).
      */
     std::span<const RuntimeLayerBinding> m_runtime_layers;
 

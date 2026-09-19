@@ -27,6 +27,7 @@ using landor::geo::LayerSourceLayout;
 using landor::geo::has_contribution;
 using landor::geo::open_layer_source;
 using landor::geo::read_cells;
+using landor::geo::write_cells;
 
 using landor::storage::Error;
 using landor::storage::Offset;
@@ -40,15 +41,21 @@ constexpr SourceId k_unknown_source = 1;
 
 
 /**
- * In-memory StorageBackend that records every read request.
+ * In-memory StorageBackend that records every read and write request.
  *
- * Also supports injecting storage-level failures so the reader's error
- * mapping can be tested without touching a real filesystem.
+ * Also supports injecting storage-level failures so the reader's and
+ * writer's error mapping can be tested without touching a real filesystem.
  */
 class RecordingStorage
 {
 public:
     struct ReadRequest
+    {
+        Offset offset;
+        std::size_t size;
+    };
+
+    struct WriteRequest
     {
         Offset offset;
         std::size_t size;
@@ -67,6 +74,11 @@ public:
     void fail_reads_with(Error error)
     {
         m_read_error = error;
+    }
+
+    void fail_writes_with(Error error)
+    {
+        m_write_error = error;
     }
 
     [[nodiscard]] Result read(
@@ -112,6 +124,11 @@ public:
             return Result{Error::invalid_source};
         }
 
+        if (m_write_error != Error::none)
+        {
+            return Result{m_write_error};
+        }
+
         const std::size_t total = m_bytes.size();
         if (offset > total || data.size() > total - offset)
         {
@@ -123,6 +140,7 @@ public:
             std::memcpy(m_bytes.data() + offset, data.data(), data.size());
         }
 
+        m_writes.push_back(WriteRequest{offset, data.size()});
         return Result{};
     }
 
@@ -152,6 +170,21 @@ public:
         m_requests.clear();
     }
 
+    [[nodiscard]] const std::vector<WriteRequest>& writes() const
+    {
+        return m_writes;
+    }
+
+    void clear_writes()
+    {
+        m_writes.clear();
+    }
+
+    [[nodiscard]] const std::string& bytes() const
+    {
+        return m_bytes;
+    }
+
     [[nodiscard]] std::size_t total_requested_bytes() const
     {
         std::size_t total = 0;
@@ -166,8 +199,10 @@ public:
 private:
     std::string m_bytes;
     mutable std::vector<ReadRequest> m_requests;
+    std::vector<WriteRequest> m_writes;
     Error m_size_error = Error::none;
     Error m_read_error = Error::none;
+    Error m_write_error = Error::none;
 };
 
 
@@ -1214,4 +1249,240 @@ TEST(LayerSource, OpenDoesNotReadTheDataSection)
             static_cast<unsigned char>(
                 cell_byte(static_cast<std::uint32_t>(4 + i), 250)));
     }
+}
+
+
+TEST(LayerSource, WritesExactlyTheRequestedCellRange)
+{
+    RecordingStorage storage;
+    LayerSourceLayout layout {};
+
+    ASSERT_TRUE(open_default(storage, layout));
+    const std::string before = storage.bytes();
+    storage.clear_requests();
+    storage.clear_writes();
+
+    const std::byte data[] = {std::byte{'X'}, std::byte{'Y'}};
+    const auto result = write_cells(
+        layout, storage, k_source, /*row=*/1, /*x=*/1,
+        std::span<const std::byte>(data));
+
+    ASSERT_TRUE(result);
+    ASSERT_EQ(storage.writes().size(), 1u);
+
+    // Exactly the requested fragment: column 1 of row 1, two cells.
+    const auto& write = storage.writes()[0];
+    EXPECT_EQ(
+        write.offset,
+        static_cast<Offset>(
+            layout.data_offset
+            + static_cast<std::uint64_t>(1u) * layout.row_stride + 1u));
+    EXPECT_EQ(write.size, 2u);
+
+    const std::string& after = storage.bytes();
+    EXPECT_EQ(after.size(), before.size());
+    EXPECT_EQ(static_cast<unsigned char>(after[write.offset]), 'X');
+    EXPECT_EQ(static_cast<unsigned char>(after[write.offset + 1u]), 'Y');
+
+    // No byte outside the written range changed, including the touched
+    // row terminator: the write never moves or overwrites it.
+    for (std::size_t i = 0; i < before.size(); ++i)
+    {
+        if (i >= write.offset && i < write.offset + write.size)
+        {
+            continue;
+        }
+        EXPECT_EQ(after[i], before[i]) << "byte " << i << " changed";
+    }
+
+    // The touched row still reads back normally through the reader.
+    std::array<std::byte, 4> destination {};
+    EXPECT_TRUE(read_cells(
+        layout, storage, k_source, /*row=*/1, /*x=*/0, destination));
+}
+
+
+TEST(LayerSource, EmptyWritePerformsNoStorageIO)
+{
+    RecordingStorage storage;
+    LayerSourceLayout layout {};
+
+    ASSERT_TRUE(open_default(storage, layout));
+    storage.clear_requests();
+    storage.clear_writes();
+
+    // An empty fragment succeeds, including at x == width.
+    const std::byte* no_bytes = nullptr;
+    EXPECT_TRUE(write_cells(
+        layout, storage, k_source, /*row=*/0, /*x=*/0,
+        std::span<const std::byte>(no_bytes, 0)));
+    EXPECT_TRUE(write_cells(
+        layout, storage, k_source, /*row=*/0, /*x=*/layout.width,
+        std::span<const std::byte>(no_bytes, 0)));
+
+    EXPECT_TRUE(storage.requests().empty());
+    EXPECT_TRUE(storage.writes().empty());
+}
+
+
+TEST(LayerSource, WriteRejectsOutOfRangeRanges)
+{
+    RecordingStorage storage;
+    LayerSourceLayout layout {};
+
+    ASSERT_TRUE(open_default(storage, layout));
+    storage.clear_requests();
+    storage.clear_writes();
+
+    const std::byte one[] = {std::byte{'X'}};
+    const std::byte two[] = {std::byte{'X'}, std::byte{'X'}};
+
+    auto result = write_cells(
+        layout, storage, k_source,
+        /*row=*/layout.height, /*x=*/0, std::span<const std::byte>(one));
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), LayerSourceError::OutOfRange);
+
+    result = write_cells(
+        layout, storage, k_source, /*row=*/0, /*x=*/layout.width,
+        std::span<const std::byte>(one));
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), LayerSourceError::OutOfRange);
+
+    // The fragment would cross the touched row's terminator.
+    result = write_cells(
+        layout, storage, k_source, /*row=*/0, /*x=*/layout.width - 1u,
+        std::span<const std::byte>(two));
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), LayerSourceError::OutOfRange);
+
+    // A column far beyond the width must not wrap or clamp.
+    result = write_cells(
+        layout, storage, k_source, /*row=*/0, /*x=*/4000000000u,
+        std::span<const std::byte>(one));
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), LayerSourceError::OutOfRange);
+
+    // No I/O happened on any rejected range.
+    EXPECT_TRUE(storage.requests().empty());
+    EXPECT_TRUE(storage.writes().empty());
+}
+
+
+TEST(LayerSource, WriteRejectsNewlineInCellData)
+{
+    RecordingStorage storage;
+    LayerSourceLayout layout {};
+
+    ASSERT_TRUE(open_default(storage, layout));
+    const std::string before = storage.bytes();
+    storage.clear_requests();
+    storage.clear_writes();
+
+    // LF is structural in v1 and can never be a cell value.
+    const std::byte data[] = {std::byte{'X'}, std::byte{0x0A}, std::byte{'Y'}};
+    const auto result = write_cells(
+        layout, storage, k_source, /*row=*/0, /*x=*/0,
+        std::span<const std::byte>(data));
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), LayerSourceError::MalformedData);
+
+    // Rejected before any Storage I/O, so nothing changed.
+    EXPECT_TRUE(storage.requests().empty());
+    EXPECT_TRUE(storage.writes().empty());
+    EXPECT_EQ(storage.bytes(), before);
+}
+
+
+TEST(LayerSource, WriteRejectsNonNewlineTouchedRowTerminator)
+{
+    // Corrupt row 1's structural terminator byte before opening.
+    std::string source = make_default_source();
+    const std::size_t terminator =
+        make_header({"V:1.0", "D:4 3", "P:0 0"}).size()
+        + static_cast<std::size_t>(k_width + 1u) + k_width;
+    source[terminator] = 'X';
+
+    RecordingStorage storage;
+    storage.set_bytes(source);
+
+    const auto opened = open_layer_source(storage, k_source);
+    ASSERT_TRUE(opened);
+    const auto& layout = *opened;
+    storage.clear_requests();
+    storage.clear_writes();
+
+    const std::byte data[] = {std::byte{'X'}};
+    const auto result = write_cells(
+        layout, storage, k_source, /*row=*/1, /*x=*/0,
+        std::span<const std::byte>(data));
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), LayerSourceError::MalformedData);
+
+    // The terminator read happened, but no write did.
+    EXPECT_EQ(storage.requests().size(), 1u);
+    EXPECT_TRUE(storage.writes().empty());
+}
+
+
+TEST(LayerSource, WriteAllowsAsciiSpaceCells)
+{
+    RecordingStorage storage;
+    LayerSourceLayout layout {};
+
+    ASSERT_TRUE(open_default(storage, layout));
+    storage.clear_writes();
+
+    // ASCII space is a valid no-contribution cell byte, not an error.
+    const std::byte data[] = {std::byte{0x20}};
+    const auto result = write_cells(
+        layout, storage, k_source, /*row=*/0, /*x=*/0,
+        std::span<const std::byte>(data));
+
+    ASSERT_TRUE(result);
+    ASSERT_EQ(storage.writes().size(), 1u);
+    EXPECT_EQ(
+        static_cast<unsigned char>(
+            storage.bytes()[storage.writes()[0].offset]),
+        0x20);
+    EXPECT_FALSE(has_contribution(std::byte{0x20}));
+}
+
+
+TEST(LayerSource, WriteMapsCellWriteStorageFailure)
+{
+    RecordingStorage storage;
+    LayerSourceLayout layout {};
+
+    ASSERT_TRUE(open_default(storage, layout));
+    storage.fail_writes_with(Error::write_failed);
+
+    const std::byte data[] = {std::byte{'X'}};
+    const auto result = write_cells(
+        layout, storage, k_source, /*row=*/0, /*x=*/0,
+        std::span<const std::byte>(data));
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), LayerSourceError::StorageFailed);
+}
+
+
+TEST(LayerSource, WriteMapsTerminatorReadStorageFailure)
+{
+    RecordingStorage storage;
+    LayerSourceLayout layout {};
+
+    ASSERT_TRUE(open_default(storage, layout));
+    storage.fail_reads_with(Error::read_failed);
+
+    const std::byte data[] = {std::byte{'X'}};
+    const auto result = write_cells(
+        layout, storage, k_source, /*row=*/0, /*x=*/0,
+        std::span<const std::byte>(data));
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), LayerSourceError::StorageFailed);
+    EXPECT_TRUE(storage.writes().empty());
 }

@@ -25,6 +25,7 @@ add_executable(Landor
     src/world/patchset.hpp
     src/world/place.hpp
     src/world/map.hpp
+    src/world/map_persistence.hpp
     src/world/map_result.hpp
     src/world/chunk.hpp
     src/world/cache.hpp
@@ -104,6 +105,7 @@ if(LANDOR_BUILD_TESTS)
         tests/world/test_placement.cpp
         tests/world/test_map_placement.cpp
         tests/world/test_map_mutation.cpp
+        tests/world/test_map_persistence.cpp
         tests/world/test_map_result.cpp
         tests/world/test_map_value.cpp
         tests/world/test_map_at.cpp

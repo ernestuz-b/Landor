@@ -165,9 +165,9 @@ Cache capacity counts spatial slots. The Cache has a canonical two-dimensional C
 
 When a caller requests a Tile, Map ensures the required layer planes are resident and Cache packs one value from each layer at that coordinate into a fresh Tile.
 
-The current first Cache implementation deliberately has no replacement or write-back policy. Full capacity causes a new-area fill to fail rather than silently inventing eviction semantics.
+The current first Cache implementation deliberately has no replacement policy. Full capacity causes a new-area fill to fail rather than silently inventing eviction semantics. Write-back is not a Cache policy either: the Cache only exposes the persistence hooks (dirty-plane enumeration and `mark_clean<LayerT>()`) that Map's explicit `flush<LayerT>()` drives (D-38).
 
-Dirty state is per resident layer plane per spatial slot, not per cell (D-37): a changed resident value dirties the whole plane, a same-value set does not dirty a clean plane, and once dirty a plane stays dirty until the Cache is destroyed. `fill()` refuses to overwrite a dirty target plane, and both invalidation forms refuse atomically — changing nothing — when they would discard a dirty resident plane. A dirty plane cannot be flushed, cleared or written back yet.
+Dirty state is per resident layer plane per spatial slot, not per cell (D-37): a changed resident value dirties the whole plane, a same-value set does not dirty a clean plane, and once dirty a plane stays dirty until Map's explicit write-back clears it (D-38) or the Cache is destroyed. `fill()` refuses to overwrite a dirty target plane, and both invalidation forms refuse atomically — changing nothing — when they would discard a dirty resident plane.
 
 ### 5.6 Region is algorithmic, not storage-shaped
 
@@ -277,9 +277,9 @@ The Map:
 - owns live Placements;
 - refers to immutable authored Patch descriptors;
 - borrows two explicit storage roles: a const authored Storage reference
-  (immutable read source) and a mutable runtime Storage reference (writable
-  persistence for future materialisation/write-back); the same Storage
-  object may fill both roles;
+  (immutable read source) and a mutable runtime Storage reference (the
+  explicit write-back target of D-38); the same Storage object may fill
+  both roles;
 - borrows the runtime layer binding catalogue
   (`std::span<const RuntimeLayerBinding>`, D-35): one logical runtime
   overlay source per Map layer, identified by `(MapId, LayerId)`; the span
@@ -325,7 +325,7 @@ World mutations should have a small number of explicit front doors so Cache inva
 
 A Tile returned by value is not a live proxy into the world. Mutating the Tile changes only the local copy.
 
-The first mutation door is implemented: `Map::set<LayerT>(position, value)` mutates one live layer value through the Cache, marks the resident layer plane dirty, and performs no Storage write (D-37). Dirty state is not a checked-access failure: it never appears in `MapError`, and dirty-safe invalidation keeps the value from being discarded until a write-back slice exists. The broader mutation API remains open and should be introduced by concrete simulation requirements rather than by speculative framework design.
+The first mutation door is implemented: `Map::set<LayerT>(position, value)` mutates one live layer value through the Cache, marks the resident layer plane dirty, and performs no Storage write (D-37). Dirty state is not a checked-access failure: it never appears in `MapError`, and dirty-safe invalidation keeps the value from being discarded until the explicit write-back `flush<LayerT>()` persists it (D-38). The broader mutation API remains open and should be introduced by concrete simulation requirements rather than by speculative framework design.
 
 ## 9. Storage
 
@@ -604,7 +604,7 @@ The following remain intentionally open:
 - final mutation API between simulations and materialized layer state;
 - exact source/layer/spatial-coordinate to byte-range mapping where not already defined by a concrete format;
 - Cache replacement policy;
-- dirty write-back/flush policy (dirty state itself is implemented per D-37);
+- flush scheduling / automatic-flush policy and crash consistency of the explicit write-back (the explicit per-layer flush itself is implemented per D-38);
 - `Region` ownership/view/mutation semantics;
 - long-term repository relationship of `include/managed_heap/` (vendored vs submodule/subrepo);
 - exact logging record representation and formatter on embedded targets;

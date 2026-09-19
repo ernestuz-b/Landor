@@ -153,6 +153,8 @@ The current implementation provides:
 - `set<LayerT>(position, value)` for resident layer mutation;
 - `dirty<LayerT>(position)` for per-plane dirty queries;
 - `has_dirty()` for any-dirty-state queries;
+- `dirty_chunks<LayerT>(output)` for fixed-capacity enumeration of the layer's dirty planes;
+- `mark_clean<LayerT>(chunk)` to clear one plane's dirty bit (the write-back hook of D-38);
 - `tile(position)` for presentation-time Tile packing;
 - `fill<LayerT>(chunk, values)`;
 - `invalidate(area)`, `[[nodiscard]] bool`, dirty-safe;
@@ -164,7 +166,7 @@ If a new spatial area is requested when all slots are occupied, `fill()` returns
 
 `fill()` is also dirty-safe: it refuses to overwrite a dirty target plane and returns `false` without writing, so a resolved value can never silently replace an unflushed mutation (D-37).
 
-`set<LayerT>()` mutates an already-resident value and marks that resident layer plane dirty when — and only when — the value actually changes; a same-value set is a no-op on a clean plane. Dirty flags are per resident layer plane per spatial slot, not per cell: `fill()` installs a clean plane, and once a plane is dirty it stays dirty. There is no flush, clear or write-back API: dirty state persists until the Cache is destroyed.
+`set<LayerT>()` mutates an already-resident value and marks that resident layer plane dirty when — and only when — the value actually changes; a same-value set is a no-op on a clean plane. Dirty flags are per resident layer plane per spatial slot, not per cell: `fill()` installs a clean plane, and once a plane is dirty it stays dirty. The only clearing path is `mark_clean<LayerT>()`, called only by Map's explicit `flush<LayerT>()` (D-38) after a plane has been fully persisted: no fill, invalidation or placement operation clears dirt, so dirty state otherwise persists until the Cache is destroyed.
 
 Both invalidation forms are atomic and dirty-safe: if any slot that would be discarded contains a dirty resident plane, the whole operation is refused and the Cache remains unchanged, returning `false`. A dirty slot outside the invalidated area does not block `invalidate(area)`, because it is not discarded.
 
@@ -176,12 +178,11 @@ The returned Tile is not cache storage. It remains valid independently of future
 
 ### Deferred Cache policy
 
-The current Cache has a dirty-state model (D-37): one dirty bit per resident layer plane per spatial slot, marked by a changed `set<LayerT>()`, sticky, and protected by dirty-safe `fill()`/`invalidate()`/`invalidate_all()` refusal.
+The current Cache has a dirty-state model (D-37): one dirty bit per resident layer plane per spatial slot, marked by a changed `set<LayerT>()`, sticky, and protected by dirty-safe `fill()`/`invalidate()`/`invalidate_all()` refusal. Its only write-back exposure is the persistence hooks (`dirty_chunks<LayerT>()`, `mark_clean<LayerT>()`), which Map's explicit `flush<LayerT>()` (D-38) drives; the Cache itself performs no write-back scheduling.
 
 It still has no:
 
 - replacement policy;
-- write-back policy (dirty planes cannot yet be flushed or cleared);
 - procedural materialisation policy.
 
 These are future slices and must not be inferred from the existing no-eviction implementation.
@@ -341,9 +342,9 @@ Map borrows:
 - the runtime layer binding catalogue (`std::span<const RuntimeLayerBinding>`);
 - terminal fallback provider.
 
-Map carries two explicit storage roles because authored assets and runtime save-state must not be assumed to share one root or device (see `LAYER_STORAGE_MODEL.md`). Both references currently use the build-selected `landor::storage::Storage` alias exposed by the selected platform header (currently `StorageFilesystem`); `map.hpp` includes that header directly rather than carrying a geography-local `Storage` type. That shared backend type is current source reality, not a permanent requirement: if a concrete target needs heterogeneous authored/runtime backends, that is a platform-composition concern for a later slice. The authored role is borrowed as const, so Map can read authored sources but never write them; the runtime role is a mutable reference because future materialisation and write-back must be able to write it. The roles are semantic references, not a physical-separation requirement: the same Storage object may legitimately fill both roles. Both storage objects outlive the Map.
+Map carries two explicit storage roles because authored assets and runtime save-state must not be assumed to share one root or device (see `LAYER_STORAGE_MODEL.md`). Both references currently use the build-selected `landor::storage::Storage` alias exposed by the selected platform header (currently `StorageFilesystem`); `map.hpp` includes that header directly rather than carrying a geography-local `Storage` type. That shared backend type is current source reality, not a permanent requirement: if a concrete target needs heterogeneous authored/runtime backends, that is a platform-composition concern for a later slice. The authored role is borrowed as const, so Map can read authored sources but never write them; the runtime role is a mutable reference because the explicit write-back (D-38) writes through it, and future materialisation may extend that role. The roles are semantic references, not a physical-separation requirement: the same Storage object may legitimately fill both roles. Both storage objects outlive the Map.
 
-Map also borrows the runtime layer binding catalogue, a `std::span<const RuntimeLayerBinding>` from `src/world/runtime_layer_source.hpp` scoped to this Map instance: a binding `{ layer, source }` identifies the logical runtime/materialised overlay source of `(Map::id(), layer)` in the runtime storage role (D-35). The constructor asserts the catalogue precondition — every binding names a layer supported by the Map type, and no `LayerId` appears twice in the span; a duplicate is invalid configuration, not a precedence case. Zero bindings means this Map currently has no persistent runtime overlay source for those layers, which is not the same as an unsupported layer. Checked reads consult the catalogue (D-36): when a binding names `LayerT`, `Map::runtime_binding<LayerT>()` returns it and the bound runtime source is opened and validated once per missing layer Chunk, with non-space cells authoritative over authored state; when no binding names the layer the runtime storage role is never inspected. No current write path consults the catalogue. The backing records outlive the Map.
+Map also borrows the runtime layer binding catalogue, a `std::span<const RuntimeLayerBinding>` from `src/world/runtime_layer_source.hpp` scoped to this Map instance: a binding `{ layer, source }` identifies the logical runtime/materialised overlay source of `(Map::id(), layer)` in the runtime storage role (D-35). The constructor asserts the catalogue precondition — every binding names a layer supported by the Map type, and no `LayerId` appears twice in the span; a duplicate is invalid configuration, not a precedence case. Zero bindings means this Map currently has no persistent runtime overlay source for those layers, which is not the same as an unsupported layer. Checked reads consult the catalogue (D-36): when a binding names `LayerT`, `Map::runtime_binding<LayerT>()` returns it and the bound runtime source is opened and validated once per missing layer Chunk, with non-space cells authoritative over authored state; when no binding names the layer the runtime storage role is never inspected. The only current write path is the explicit write-back: `flush<LayerT>()` consults the catalogue to find the bound runtime source before persisting a dirty plane (D-38). The backing records outlive the Map.
 
 The terminal fallback dependency is a `FallbackT` template parameter constrained by `LayerFallbackProvider<FallbackT, CoordT, Layers...>` from `src/world/layer_fallback.hpp`. Map stores a `const fallback_type&` and owns nothing, and exposes no public accessor for it. The provider answers one small operation:
 
@@ -370,7 +371,9 @@ It validates the coordinate first (OutOfBounds before any cache, source or fallb
 
 `Map::value<LayerT>(position)` is implemented: it validates the coordinate first (OutOfBounds before any cache, source or fallback work), ensures only the requested layer is resident through the chunk-plane seam below, and returns the resident layer value from the Cache.
 
-`Map::set<LayerT>(position, value)` is the first mutable world-state path: it validates the coordinate first, ensures only the requested layer is resident through the same chunk-plane seam (installing a clean plane when the Chunk is missing), then mutates the resident value through `Cache::set<LayerT>()`, which marks the layer plane dirty only when the value actually changes. No Storage write happens, dirty state is not a `MapError`, and the dirty resident value is authoritative for subsequent reads of that Chunk — `value<LayerT>()` and `at()` return it without rereading runtime, authored or fallback state. A missing runtime binding only means there is no persistent runtime source yet; the dirty plane simply cannot be persisted until a write-back slice exists.
+`Map::set<LayerT>(position, value)` is the first mutable world-state path: it validates the coordinate first, ensures only the requested layer is resident through the same chunk-plane seam (installing a clean plane when the Chunk is missing), then mutates the resident value through `Cache::set<LayerT>()`, which marks the layer plane dirty only when the value actually changes. No Storage write happens, dirty state is not a `MapError`, and the dirty resident value is authoritative for subsequent reads of that Chunk — `value<LayerT>()` and `at()` return it without rereading runtime, authored or fallback state. A missing runtime binding only means there is no persistent runtime source yet; a dirty plane that genuinely differs from its backing state cannot be persisted without a binding, and `flush<LayerT>()` fails it with `MapPersistenceErrorCode::MissingRuntimeBinding` (D-38).
+
+`Map::flush<LayerT>()` is the explicit dirty-state write-back (D-38): it collects the dirty `LayerT` Chunks through `Cache::dirty_chunks<LayerT>()` into fixed-capacity stack storage, re-resolves each plane's fresh backing answer through the normal resolution chain (never through the dirty resident Cache), compares it with the live plane over the logical in-Map cells only, marks the plane clean without any write when nothing differs, and otherwise persists exactly the differing cells through the bound runtime source with `write_cells()` (preflighting encodability first), marking the plane clean only after the whole plane succeeds. `Map::flush_all()` walks the declared template layer order and fails fast. The result is the dedicated `MapPersistenceResult` domain of `src/world/map_persistence.hpp`; no `MapError` value is introduced.
 
 There is deliberately no public unchecked `Map::operator[]` path.
 
@@ -593,7 +596,7 @@ Checked single-layer access `Map::value<LayerT>()` is now implemented and tested
 The recommended order is:
 
 1. fuse Map mutation, Cache mutation, dirty tracking and dirty-safe invalidation into one coherent change (the checked single-layer `value<LayerT>()` slice, the checked multi-layer `Map::at()`, the runtime overlay read resolution, and the first mutable world-state path `Map::set<LayerT>()` with per-plane Cache dirty tracking and dirty-safe invalidation are now implemented and tested, D-36 and D-37);
-2. add replacement/write-back policy only after the no-eviction path is proven;
+2. add the replacement policy only after the no-eviction path is proven (explicit per-layer write-back already exists as `Map::flush<LayerT>()`/`flush_all()`, D-38; replacement under dirty pressure and flush scheduling remain open);
 3. introduce `Region` only when a simulation needs it.
 
 Do not create placeholder objects merely to stand in for missing contracts.

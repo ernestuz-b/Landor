@@ -460,3 +460,116 @@ TEST(Cache, NegativeCoordinatesUseCanonicalFloorAlignedSlot)
     EXPECT_EQ(cache.value<GroundLayer>(landor::geo::Coord32(-4, -4)), 10);
     EXPECT_EQ(cache.value<GroundLayer>(landor::geo::Coord32(-1, -1)), 25);
 }
+
+
+TEST(Cache, DirtyChunksEnumerateOnlyThatLayersDirtyPlanes)
+{
+    TestCache cache;
+    const auto ground_first = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(0, 0));
+    const auto ground_second = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(4, 0));
+    const auto fire_first = TestCache::chunk_for<FireLayer>(landor::geo::Coord32(0, 0));
+    const auto values = sequence(1);
+
+    ASSERT_TRUE(cache.fill<GroundLayer>(ground_first, values));
+    ASSERT_TRUE(cache.fill<GroundLayer>(ground_second, values));
+    ASSERT_TRUE(cache.fill<FireLayer>(fire_first, values));
+
+    cache.set<GroundLayer>(landor::geo::Coord32(1, 1), 200);
+    cache.set<GroundLayer>(landor::geo::Coord32(5, 0), 201);
+    cache.set<FireLayer>(landor::geo::Coord32(0, 3), 101);
+
+    std::array<TestCache::chunk_type, TestCache::capacity> dirty {};
+
+    // Only Ground planes enumerate, in deterministic slot order.
+    const auto ground_count = cache.dirty_chunks<GroundLayer>(dirty);
+    ASSERT_EQ(ground_count, 2u);
+    EXPECT_EQ(dirty[0].origin(), landor::geo::Coord32(0, 0));
+    EXPECT_EQ(dirty[1].origin(), landor::geo::Coord32(4, 0));
+    EXPECT_EQ(dirty[0].layer(), GroundLayer::id);
+    EXPECT_EQ(dirty[1].layer(), GroundLayer::id);
+    EXPECT_EQ(dirty[0].side(), 4u);
+
+    // The dirty Fire plane in the first slot is not part of the
+    // Ground enumeration, and it enumerates alone for Fire.
+    const auto fire_count = cache.dirty_chunks<FireLayer>(dirty);
+    ASSERT_EQ(fire_count, 1u);
+    EXPECT_EQ(dirty[0].origin(), landor::geo::Coord32(0, 0));
+    EXPECT_EQ(dirty[0].layer(), FireLayer::id);
+}
+
+
+TEST(Cache, DirtyChunksAreEmptyWithoutDirtyPlanes)
+{
+    TestCache cache;
+    const auto chunk = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(0, 0));
+    const auto values = sequence(1);
+
+    ASSERT_TRUE(cache.fill<GroundLayer>(chunk, values));
+
+    std::array<TestCache::chunk_type, TestCache::capacity> dirty {};
+
+    // A clean resident plane does not enumerate...
+    EXPECT_EQ(cache.dirty_chunks<GroundLayer>(dirty), 0u);
+    // ...and neither does a missing plane.
+    EXPECT_EQ(cache.dirty_chunks<FireLayer>(dirty), 0u);
+}
+
+
+TEST(Cache, MarkCleanClearsOnlyTheTargetPlaneDirtyBit)
+{
+    TestCache cache;
+    const auto ground_chunk = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(0, 0));
+    const auto fire_chunk = TestCache::chunk_for<FireLayer>(landor::geo::Coord32(0, 0));
+    const auto ground_values = sequence(1);
+    const auto fire_values = sequence(101);
+
+    ASSERT_TRUE(cache.fill<GroundLayer>(ground_chunk, ground_values));
+    ASSERT_TRUE(cache.fill<FireLayer>(fire_chunk, fire_values));
+
+    cache.set<GroundLayer>(landor::geo::Coord32(1, 1), 200);
+    cache.set<FireLayer>(landor::geo::Coord32(2, 2), 107);
+    ASSERT_TRUE(cache.dirty<GroundLayer>(landor::geo::Coord32(1, 1)));
+    ASSERT_TRUE(cache.dirty<FireLayer>(landor::geo::Coord32(2, 2)));
+
+    cache.mark_clean<GroundLayer>(ground_chunk);
+
+    // The Ground plane is clean; its value and residency are untouched.
+    EXPECT_FALSE(cache.dirty<GroundLayer>(landor::geo::Coord32(1, 1)));
+    EXPECT_EQ(cache.value<GroundLayer>(landor::geo::Coord32(1, 1)), 200);
+    EXPECT_TRUE(cache.contains<GroundLayer>(landor::geo::Coord32(1, 1)));
+
+    // The Fire plane's dirty state is unaffected.
+    EXPECT_TRUE(cache.dirty<FireLayer>(landor::geo::Coord32(2, 2)));
+    EXPECT_EQ(cache.value<FireLayer>(landor::geo::Coord32(2, 2)), 107);
+
+    // The cleaned plane no longer enumerates; the dirty one still does.
+    std::array<TestCache::chunk_type, TestCache::capacity> dirty {};
+    EXPECT_EQ(cache.dirty_chunks<GroundLayer>(dirty), 0u);
+    EXPECT_EQ(cache.dirty_chunks<FireLayer>(dirty), 1u);
+}
+
+
+TEST(Cache, FillCanOverwriteAPlaneAfterMarkClean)
+{
+    TestCache cache;
+    const auto chunk = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(0, 0));
+    const auto values = sequence(1);
+
+    ASSERT_TRUE(cache.fill<GroundLayer>(chunk, values));
+
+    cache.set<GroundLayer>(landor::geo::Coord32(1, 1), 200);
+    ASSERT_TRUE(cache.dirty<GroundLayer>(landor::geo::Coord32(1, 1)));
+
+    // A fill over a dirty plane is still refused...
+    EXPECT_FALSE(cache.fill<GroundLayer>(chunk, values));
+
+    // ...until the write-back hook clears the plane.
+    cache.mark_clean<GroundLayer>(chunk);
+
+    const auto fresh = sequence(50);
+    ASSERT_TRUE(cache.fill<GroundLayer>(chunk, fresh));
+
+    EXPECT_FALSE(cache.dirty<GroundLayer>(landor::geo::Coord32(1, 1)));
+    // Local (1, 1) is plane index 5, so the fresh value is 50 + 5.
+    EXPECT_EQ(cache.value<GroundLayer>(landor::geo::Coord32(1, 1)), 55);
+}

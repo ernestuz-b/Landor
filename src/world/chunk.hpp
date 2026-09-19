@@ -39,6 +39,11 @@ public:
     using side_type   = std::uint32_t;
     using area_type   = Area<CoordT>;
 
+    /// A default-constructed Chunk is an empty placeholder (side 0). It
+    /// exists so a Chunk can occupy fixed-capacity storage, such as a
+    /// bounded enumeration buffer, before a real identity is assigned.
+    constexpr Chunk() noexcept = default;
+
     constexpr Chunk(
         LayerId layer,
         coord_type origin,

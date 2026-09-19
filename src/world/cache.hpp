@@ -38,16 +38,18 @@ namespace landor::geo
  * slot may therefore contain several independently resident layer planes for
  * the same canonical area.
  *
- * This first implementation deliberately has no replacement or write-back
- * policy. When every spatial slot is occupied, filling a new area fails rather
- * than evicting existing state.
+ * This first implementation deliberately has no replacement policy. When
+ * every spatial slot is occupied, filling a new area fails rather than
+ * evicting existing state.
  *
  * Dirty tracking is per resident layer plane per spatial slot (one dirty
  * bit, see DESIGN_DECISIONS.md D-37). A normal fill installs clean backing
  * state and never overwrites a dirty plane; set() marks a changed plane
  * dirty; and invalidation that would discard a dirty plane is refused
- * atomically. There is no dirty-clearing or write-back path yet: dirty state
- * disappears only when the Cache is destroyed.
+ * atomically. The only dirty-clearing path is the explicit write-back hook
+ * mark_clean<LayerT>() (D-38), which Map's flush<LayerT>() calls after a
+ * plane has been fully persisted: no fill, invalidation or eviction path
+ * clears dirt, so a dirty plane survives every other operation.
  */
 template<
     std::size_t Capacity,
@@ -126,8 +128,9 @@ public:
      * the whole resident layer plane dirty. A value equal to the current live
      * value changes nothing and does not turn a clean plane dirty; a plane
      * that is already dirty stays dirty. Once dirty, the plane stays dirty
-     * until a future write-back/cleaning operation exists. No mutation
-     * sequence that happens to restore the backing contents is detected.
+     * until the explicit write-back clears it through mark_clean<LayerT>()
+     * (D-38). No mutation sequence that happens to restore the backing
+     * contents is detected.
      */
     template<Layer LayerT>
         requires (std::same_as<LayerT, Layers> || ...)
@@ -185,6 +188,73 @@ public:
         }
 
         return false;
+    }
+
+    /**
+     * Enumerate the canonical Chunks of every dirty resident LayerT plane.
+     *
+     * The enumeration follows the deterministic slot order of the bounded
+     * slot array: an occupied slot whose LayerT plane is both resident and
+     * dirty contributes exactly one canonical Chunk
+     * ({ LayerT::id, slot origin, CacheChunkSide }); clean planes, missing
+     * planes and planes of other layers contribute nothing.
+     *
+     * The caller supplies the fixed-size destination, so the enumeration
+     * performs no heap allocation. output must be able to hold capacity
+     * entries; the bound is asserted, not returned.
+     */
+    template<Layer LayerT>
+        requires (std::same_as<LayerT, Layers> || ...)
+    [[nodiscard]] std::size_t
+    dirty_chunks(std::span<chunk_type> output) const noexcept
+    {
+        assert(output.size() >= capacity);
+
+        constexpr auto index = detail::layer_index<LayerT, Layers...>();
+
+        std::size_t count = 0;
+        for (const auto& slot : m_slots)
+        {
+            // A non-resident plane is never dirty; the flags are checked
+            // together, exactly like slot_has_dirty_plane().
+            if (slot.occupied && slot.resident[index] && slot.dirty[index])
+            {
+                output[count++] = chunk_type {
+                    LayerT::id,
+                    slot.origin,
+                    static_cast<typename chunk_type::side_type>(CacheChunkSide)
+                };
+            }
+        }
+
+        return count;
+    }
+
+
+    /**
+     * Clear the dirty bit of one resident LayerT plane.
+     *
+     * Preconditions: a spatial slot matching chunk.origin() exists, the
+     * LayerT plane is resident there, and it is dirty there.
+     *
+     * This is the write-back hook (D-38): Map's explicit flush() clears a
+     * plane through it only after the plane's complete persistence has
+     * succeeded. The operation touches nothing else: no values, no
+     * residency and no other layer's dirty state are altered. There is
+     * deliberately no general "clear every dirty plane" escape hatch.
+     */
+    template<Layer LayerT>
+        requires (std::same_as<LayerT, Layers> || ...)
+    void mark_clean(const chunk_type& chunk) noexcept
+    {
+        constexpr auto index = detail::layer_index<LayerT, Layers...>();
+        auto* slot = find_slot(chunk.origin());
+
+        assert(slot != nullptr);
+        assert(slot->resident[index]);
+        assert(slot->dirty[index]);
+
+        slot->dirty[index] = false;
     }
 
     /**
@@ -309,10 +379,11 @@ public:
      * only dirty state that the operation would actually discard can be
      * refused.
      *
-     * Until a write-back slice can flush dirty planes first, refusing is the
-     * safe behaviour: a plane may mix one mutated cell with many
-     * backing-resolved cells, and keeping the whole plane after a Placement
-     * change would preserve stale composition.
+     * Refusing is the safe behaviour: a plane may mix one mutated cell with
+     * many backing-resolved cells, and keeping the whole plane after a
+     * Placement change would preserve stale composition. The caller can
+     * clear the way by flushing dirty planes through Map's explicit
+     * write-back (D-38) before retrying.
      *
      * Returns true when the requested slots were discarded (or none were
      * intersected), false when the operation was refused unchanged.
