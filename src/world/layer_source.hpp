@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -170,6 +171,36 @@ inline constexpr std::size_t layer_source_metadata_read_size = 512;
 template<storage::StorageBackend Backend>
 [[nodiscard]] std::expected<LayerSourceLayout, LayerSourceError>
 open_layer_source(const Backend& storage, storage::SourceId source);
+
+
+/**
+ * Create a new blank version 1.0 dense layer source.
+ *
+ * The created source carries exactly the requested metadata — version 1.0,
+ * the given dimensions and the given natural position — and its entire cell
+ * grid is ASCII space (0x20), the no-contribution byte; the structural LF
+ * byte of every row is written explicitly.
+ *
+ * No whole-file image is held in RAM: the backend creates the source already
+ * filled with 0x20 in fixed-size blocks, and only the bounded metadata block
+ * plus one structural byte per row are written afterwards.
+ *
+ * A zero dimension fails with ZeroDimension and arithmetic that does not fit
+ * storage::Offset / storage::Size fails with Overflow, both without touching
+ * Storage. Any Storage failure from create(), write() or the reopening
+ * open_layer_source() maps to LayerSourceError::StorageFailed — including a
+ * create() finding that the source already exists, which this helper never
+ * replaces. On success the returned layout is the one parsed by reopening
+ * the created source through the existing reader.
+ */
+template<storage::StorageBackend Backend>
+[[nodiscard]] std::expected<LayerSourceLayout, LayerSourceError>
+create_blank_layer_source(
+    Backend& storage,
+    storage::SourceId source,
+    std::uint32_t width,
+    std::uint32_t height,
+    Coord32 natural_position);
 
 
 /**
@@ -818,6 +849,131 @@ open_layer_source(const Backend& storage, storage::SourceId source)
     }
 
     return std::unexpected(LayerSourceError::MissingTerminator);
+}
+
+
+template<storage::StorageBackend Backend>
+[[nodiscard]] std::expected<LayerSourceLayout, LayerSourceError>
+create_blank_layer_source(
+    Backend& storage,
+    storage::SourceId source,
+    std::uint32_t width,
+    std::uint32_t height,
+    Coord32 natural_position)
+{
+    if (width == 0 || height == 0)
+    {
+        return std::unexpected(LayerSourceError::ZeroDimension);
+    }
+
+    // Bounded metadata block: "V:1.0\nD:<w> <h>\nP:<x> <y>\n\n" where w / h
+    // hold at most 10 decimal digits and x / y at most 11 (a '-' plus 10),
+    // so the block never exceeds 64 bytes.
+    std::array<char, 64> text {};
+    std::size_t length = 0;
+
+    auto append = [&text, &length](const char* begin, std::size_t count)
+    {
+        std::copy_n(begin, count, text.data() + length);
+        length += count;
+    };
+
+    // Decimal-encode one integer into digits and append it; the bounded
+    // buffer always fits (at most 11 characters for the widths involved).
+    auto append_int = [&text, &length](auto value, std::size_t capacity)
+    {
+        char* digits = text.data() + length;
+        const auto result = std::to_chars(digits, digits + capacity, value);
+        length += static_cast<std::size_t>(result.ptr - digits);
+    };
+
+    append("V:1.0\n", 6);
+
+    append("D:", 2);
+    append_int(width, 11);
+    append(" ", 1);
+    append_int(height, 11);
+    append("\n", 1);
+
+    append("P:", 2);
+    append_int(natural_position.x(), 12);
+    append(" ", 1);
+    append_int(natural_position.y(), 12);
+    append("\n", 1);
+
+    // The terminating blank line: the second consecutive LF that ends the
+    // metadata block.
+    append("\n", 1);
+
+    // Derive the layout arithmetic in 64-bit intermediates; the derived size
+    // must fit the logical Storage widths, exactly as the reader's
+    // finalize() demands.
+    const std::uint64_t data_offset = length;
+    const std::uint64_t row_stride = static_cast<std::uint64_t>(width) + 1;
+
+    if (height > std::numeric_limits<std::uint64_t>::max() / row_stride)
+    {
+        return std::unexpected(LayerSourceError::Overflow);
+    }
+
+    const std::uint64_t data_size = static_cast<std::uint64_t>(height) * row_stride;
+
+    if (data_size > std::numeric_limits<std::uint64_t>::max() - data_offset)
+    {
+        return std::unexpected(LayerSourceError::Overflow);
+    }
+
+    const std::uint64_t expected_size = data_offset + data_size;
+
+    if (expected_size > std::numeric_limits<storage::Size>::max())
+    {
+        return std::unexpected(LayerSourceError::Overflow);
+    }
+
+    // Create the whole source already filled with the no-contribution byte,
+    // then overwrite only the metadata block and each row's structural LF.
+    const auto created = storage.create(
+        source,
+        static_cast<storage::Size>(expected_size),
+        detail::k_space);
+    if (!created)
+    {
+        // Includes Error::already_exists: this helper never replaces an
+        // existing source.
+        return std::unexpected(LayerSourceError::StorageFailed);
+    }
+
+    const auto metadata_written = storage.write(
+        source,
+        0,
+        std::span<const std::byte>(
+            reinterpret_cast<const std::byte*>(text.data()), length));
+    if (!metadata_written)
+    {
+        return std::unexpected(LayerSourceError::StorageFailed);
+    }
+
+    // Write every row's structural LF; the data section otherwise stays the
+    // 0x20 no-contribution byte.
+    for (std::uint64_t row = 0; row < height; ++row)
+    {
+        const std::uint64_t terminator_offset =
+            data_offset + row * row_stride + static_cast<std::uint64_t>(width);
+
+        std::byte newline = detail::k_newline;
+        const auto written = storage.write(
+            source,
+            static_cast<storage::Offset>(terminator_offset),
+            std::span<const std::byte>(&newline, 1));
+        if (!written)
+        {
+            return std::unexpected(LayerSourceError::StorageFailed);
+        }
+    }
+
+    // The result must be a source that opens normally through the existing
+    // reader.
+    return open_layer_source(storage, source);
 }
 
 

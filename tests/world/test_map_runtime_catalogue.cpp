@@ -9,10 +9,12 @@
 //     the contract;
 //   - the same Storage object can still be used for the authored and the
 //     runtime role at the same time as the binding catalogue;
-//   - a bound runtime source is now consulted by checked reads (D-36): a
-//     non-space runtime cell answers over authored state, and a present
-//     binding whose source cannot be opened fails the access instead of
-//     falling through.
+//   - a bound runtime source is consulted by checked reads (D-36): a
+//     non-space runtime cell answers over authored state, and an existing
+//     malformed runtime source fails the access with its exact error;
+//   - a present binding whose source does not exist yet is a reserved,
+//     unmaterialized identity (D-39): the runtime pass is skipped and the
+//     authored state or fallback answers.
 //
 // The private Map::runtime_binding() seam is deliberately not exposed; the
 // catalogue invariants are unit-tested through the free
@@ -326,15 +328,87 @@ TEST_F(MapRuntimeCatalogueTest, BoundRuntimeCellOverridesAuthored)
 }
 
 
-// D-36: a present binding whose runtime source cannot be opened is a real
-// checked-access failure, not an absent overlay. The runtime root holds no
-// file for the bound SourceId; the reader maps that storage failure to
-// LayerSourceError::StorageFailed and no fall-through to authored state
-// happens.
-TEST_F(MapRuntimeCatalogueTest, BoundRuntimeSourceAbsenceIsAnError)
+// D-36/D-39: a present binding whose runtime source does not exist yet is
+// a reserved, unmaterialized identity, not a checked-access failure. The
+// runtime root holds no file for the bound SourceId; the runtime pass is
+// skipped and the authored placement answers.
+TEST_F(MapRuntimeCatalogueTest, BoundButAbsentRuntimeSourceIsNotConsulted)
 {
     // Only the authored root contains a source file.
     write_source(m_authored_root_path, make_layer_file(4, 4, 0, 0, rows_a));
+
+    const std::array<RuntimeLayerBinding, 1> runtime_layers {
+        {Terrain::id, SourceId {0}}
+    };
+
+    Storage authored_storage {m_authored_root, m_sources};
+    Storage runtime_storage {m_runtime_root, m_sources};
+    ConstantFallback fallback {};
+    TestMap map {
+        1,
+        k_map_area,
+        std::span<const Patch> {m_patches},
+        authored_storage,
+        runtime_storage,
+        std::span<const RuntimeLayerBinding> {runtime_layers},
+        fallback
+    };
+
+    const auto placed = map.place(k_patch_id, Coord32(0, 0));
+    ASSERT_TRUE(placed.has_value());
+
+    // The reserved-but-absent runtime source is skipped: the authored 'A'
+    // answers.
+    const auto result = map.value<Terrain>(Coord32(2, 1));
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, static_cast<std::uint8_t>('A'));
+
+    // No read created the runtime source.
+    bool present = true;
+    ASSERT_TRUE(runtime_storage.exists(SourceId {0}, present));
+    EXPECT_FALSE(present);
+}
+
+
+// D-36/D-39: with nothing authored under the probe cell either, a
+// reserved-but-absent runtime source falls through to the fallback.
+TEST_F(MapRuntimeCatalogueTest, BoundButAbsentRuntimeSourceFallsThroughToFallback)
+{
+    // No authored patch is placed, and the runtime root holds no file.
+    const std::array<RuntimeLayerBinding, 1> runtime_layers {
+        {Terrain::id, SourceId {0}}
+    };
+
+    Storage authored_storage {m_authored_root, m_sources};
+    Storage runtime_storage {m_runtime_root, m_sources};
+    ConstantFallback fallback {};
+    TestMap map {
+        1,
+        k_map_area,
+        std::span<const Patch> {m_patches},
+        authored_storage,
+        runtime_storage,
+        std::span<const RuntimeLayerBinding> {runtime_layers},
+        fallback
+    };
+
+    const auto result = map.value<Terrain>(Coord32(2, 1));
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, 0u);
+}
+
+
+// D-36: an existing runtime source that cannot be opened is a real
+// checked-access failure with its exact error, not an absent overlay. The
+// runtime root holds a file for the bound SourceId whose V record does not
+// follow the version 1.0 grammar, so open fails with MalformedMetadata and
+// no fall-through to authored state happens.
+TEST_F(MapRuntimeCatalogueTest, BoundRuntimeSourceThatCannotBeOpenedIsStillAnError)
+{
+    // Only the authored root contains a source file; the runtime root holds
+    // a malformed file for the bound SourceId.
+    write_source(m_authored_root_path, make_layer_file(4, 4, 0, 0, rows_a));
+    write_source(m_runtime_root_path, "V:1.x\nD:16 16\nP:0 0\n\n" + make_runtime_file('R'));
 
     const std::array<RuntimeLayerBinding, 1> runtime_layers {
         {Terrain::id, SourceId {0}}
@@ -360,7 +434,7 @@ TEST_F(MapRuntimeCatalogueTest, BoundRuntimeSourceAbsenceIsAnError)
     ASSERT_FALSE(result.has_value());
     const auto* error = std::get_if<landor::geo::LayerSourceError>(&result.error());
     ASSERT_NE(error, nullptr);
-    EXPECT_EQ(*error, landor::geo::LayerSourceError::StorageFailed);
+    EXPECT_EQ(*error, landor::geo::LayerSourceError::MalformedMetadata);
 }
 
 

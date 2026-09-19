@@ -5,8 +5,8 @@ This file describes **what exists now**, not the final architecture.
 Source baseline reviewed before this update:
 
 ```text
-96d34b9263d830dc0175011205e15f35bb5c5602
-world: implement Map::set with dirty-safe Cache invalidation
+5a12b49de8bd7cf444194390893fed1bbdcddaf6
+world: implement explicit dirty-state write-back
 ```
 
 For intended architecture, read `dev-docs/DESIGN_STATE.md`,
@@ -76,13 +76,14 @@ tests/world/test_map_value.cpp
 tests/world/test_map_at.cpp
 tests/world/test_map_storage_roles.cpp
 tests/world/test_runtime_layer_source.cpp
+tests/world/test_runtime_layer_materialization.cpp
 tests/world/test_map_runtime_catalogue.cpp
 tests/world/test_map_runtime_overlay.cpp
 
 tests/platform/storage/test_storage_filesystem.cpp
 ```
 
-`Tile`, `Chunk`, `Cache`, the streaming layer source reader, the authored Patch/source geometry contract, the Placement coordinate transform, the live Placement lifecycle on Map, filesystem storage, and the checked Map point access (`Map::value<LayerT>()` and `Map::at()`) now have behavioural GoogleTests. The terminal layer fallback contract and the checked Map access result contract keep their compile-time assertions in `tests/world/test_layer_fallback.cpp`, `tests/world/test_map_result.cpp` and the header tripwire, and are now additionally exercised behaviourally through `value<LayerT>()` in `tests/world/test_map_value.cpp` and `at()` in `tests/world/test_map_at.cpp`. The two explicit Map storage roles are pinned by focused behavioural tests in `tests/world/test_map_storage_roles.cpp` (authored resolution uses only the authored root, a missing runtime source is not an error while no binding names the layer, and one Storage object may fill both roles) and by the constructor tripwire in `tests/test_world_headers.cpp`. The runtime layer source identity/geometry contract (one logical runtime overlay source per Map layer, source geometry pinned to the complete Map area, defensive narrow-coordinate comparisons) is pinned by `tests/world/test_runtime_layer_source.cpp`, and the Map runtime binding catalogue (empty and one-binding construction, the old constructor no longer being current, a bound runtime cell overriding authored state, and a bound-but-absent runtime source failing the access) is pinned by `tests/world/test_map_runtime_catalogue.cpp`. The implemented runtime overlay read resolution (D-36) is pinned by `tests/world/test_map_runtime_overlay.cpp`: per-cell precedence over authored state and the fallback, space fall-through, mixed cells coexisting in one Chunk, a fully runtime-resolved Chunk skipping broken authored sources, exact `LayerSourceError`/`RuntimeLayerSourceError` propagation, missing-binding versus bound-but-broken behaviour, and residency of resolved Chunks. The first mutable world-state path (`Map::set<LayerT>()` plus Cache dirty tracking and dirty-safe invalidation, D-37) is pinned by `tests/world/test_map_mutation.cpp`: fallback, runtime and authored backed mutations, the dirty resident value being authoritative for subsequent reads without rereading, same-value sets creating no dirty state, bounds checks before resolution work, exact source-error propagation without creating dirty state, and `CacheFull` when a mutation would need a new spatial slot; the dirty-behaviour contract itself is pinned by the extended `tests/world/test_cache.cpp` (per-plane dirty flags, same-value no-op, fill refusal over dirty planes, atomic dirty-safe area and full invalidation), and the dirty-safe placement lifecycle by the extended `tests/world/test_map_placement.cpp` (`DirtyState` creation and transform rejections, UnknownPatch/CapacityFull ordering, no-op transforms succeeding while dirty). The explicit dirty-state write-back (`Map::flush<LayerT>()`/`flush_all()` plus the Cache persistence hooks, D-38) is pinned by `tests/world/test_map_persistence.cpp`: no-dirty flushes without I/O, fallback/runtime/authored-backed mutations persisting exactly the differing cells, untouched authored cells staying space in the overlay while the authored file remains byte-for-byte unchanged, restored values clearing without any write, `MissingRuntimeBinding` and `UnencodableValue` leaving the plane dirty and authoritative, exact `LayerSourceError`/`AuthoredLayerSourceError`/`RuntimeLayerSourceError` propagation, the fail-fast multi-layer walk, and placement resumption after a successful flush. The bounded `write_cells()` writer is pinned in the extended `tests/world/test_layer_source.cpp` (exact range write, empty no-IO write, out-of-range rejection, newline rejection before I/O, touched-row terminator validation, storage failure mapping), and the Cache hooks (`dirty_chunks<LayerT>()`, `mark_clean<LayerT>()`) by the extended `tests/world/test_cache.cpp`.
+`Tile`, `Chunk`, `Cache`, the streaming layer source reader, the authored Patch/source geometry contract, the Placement coordinate transform, the live Placement lifecycle on Map, filesystem storage, and the checked Map point access (`Map::value<LayerT>()` and `Map::at()`) now have behavioural GoogleTests. The terminal layer fallback contract and the checked Map access result contract keep their compile-time assertions in `tests/world/test_layer_fallback.cpp`, `tests/world/test_map_result.cpp` and the header tripwire, and are now additionally exercised behaviourally through `value<LayerT>()` in `tests/world/test_map_value.cpp` and `at()` in `tests/world/test_map_at.cpp`. The two explicit Map storage roles are pinned by focused behavioural tests in `tests/world/test_map_storage_roles.cpp` (authored resolution uses only the authored root, a missing runtime source is not an error while no binding names the layer, and one Storage object may fill both roles) and by the constructor tripwire in `tests/test_world_headers.cpp`. The runtime layer source identity/geometry contract (one logical runtime overlay source per Map layer, source geometry pinned to the complete Map area, defensive narrow-coordinate comparisons) is pinned by `tests/world/test_runtime_layer_source.cpp`, and the Map runtime binding catalogue (empty and one-binding construction, the old constructor no longer being current, a bound runtime cell overriding authored state, a reserved-but-absent runtime source being skipped in favour of authored state or the fallback, and an existing malformed runtime source failing the access exactly) is pinned by `tests/world/test_map_runtime_catalogue.cpp`. The implemented runtime overlay read resolution (D-36) is pinned by `tests/world/test_map_runtime_overlay.cpp`: per-cell precedence over authored state and the fallback, space fall-through, mixed cells coexisting in one Chunk, a fully runtime-resolved Chunk skipping broken authored sources, exact `LayerSourceError`/`RuntimeLayerSourceError` propagation, missing-binding versus bound-but-absent versus bound-but-broken behaviour, and residency of resolved Chunks. The lazy runtime materialisation (`materialize_runtime_layer_source()`, D-39) is pinned by `tests/world/test_runtime_layer_materialization.cpp`: the created source is a blank dense v1 source whose `P`/`D` metadata derive exactly from the complete Map area (including off-origin areas), every cell is the no-contribution space byte, an existing source is never replaced, and unrepresentable Map areas fail with `InvalidMapGeometry` before any Storage is touched. The first mutable world-state path (`Map::set<LayerT>()` plus Cache dirty tracking and dirty-safe invalidation, D-37) is pinned by `tests/world/test_map_mutation.cpp`: fallback, runtime and authored backed mutations, the dirty resident value being authoritative for subsequent reads without rereading, same-value sets creating no dirty state, bounds checks before resolution work, exact source-error propagation without creating dirty state, and `CacheFull` when a mutation would need a new spatial slot; the dirty-behaviour contract itself is pinned by the extended `tests/world/test_cache.cpp` (per-plane dirty flags, same-value no-op, fill refusal over dirty planes, atomic dirty-safe area and full invalidation), and the dirty-safe placement lifecycle by the extended `tests/world/test_map_placement.cpp` (`DirtyState` creation and transform rejections, UnknownPatch/CapacityFull ordering, no-op transforms succeeding while dirty). The explicit dirty-state write-back (`Map::flush<LayerT>()`/`flush_all()` plus the Cache persistence hooks, D-38) is pinned by `tests/world/test_map_persistence.cpp`: no-dirty flushes without I/O, fallback/runtime/authored-backed mutations persisting exactly the differing cells, untouched authored cells staying space in the overlay while the authored file remains byte-for-byte unchanged, restored values clearing without any write, `MissingRuntimeBinding` and `UnencodableValue` leaving the plane dirty and authoritative, lazy materialisation of a reserved-but-absent bound source on the first flush carrying a genuine difference (absent sources never materialise without real dirty work, unencodable preflight creates no source, and an existing malformed source is reported exactly and left byte-for-byte untouched), exact `LayerSourceError`/`AuthoredLayerSourceError`/`RuntimeLayerSourceError` propagation, the fail-fast multi-layer walk, and placement resumption after a successful flush. The bounded `write_cells()` writer and the blank dense v1 source helper `create_blank_layer_source()` are pinned in the extended `tests/world/test_layer_source.cpp` (exact range write, empty no-IO write, out-of-range rejection, newline rejection before I/O, touched-row terminator validation, storage failure mapping; exact blank metadata/dimensions/position bytes, zero-dimension and size-overflow rejection before any Storage touch, and create/write failure mapping including `already_exists`), and the Cache hooks (`dirty_chunks<LayerT>()`, `mark_clean<LayerT>()`) by the extended `tests/world/test_cache.cpp`.
 
 The final test-layout rule is still to mirror `src/` under `tests/`. The newer mapping and platform-storage tests already do that; `test_area.cpp`, `test_coord.cpp`, and the all-headers tripwire still live at the test root and can be moved separately.
 
@@ -193,12 +194,12 @@ Its current header is aligned to the new Cache model:
 - `Map::value<LayerT>()` is implemented: layer-specific checked access returning `MapResult<LayerT::value_type>` — bounds check first, canonical chunk residency, chunk-plane resolution (runtime overlay when a binding names the layer, then authored Placements in descending `PlacementId` order, then the terminal fallback), and installation through `Cache::fill<LayerT>()`;
 - the live Placement lifecycle is implemented: `place()` (both overloads) returns `MapPlacementResult = std::expected<PlacementId, MapPlacementError>`; unknown Patch is checked before capacity and dirty state; the whole-cache invalidation is performed before the `PlacementId` is assigned and the Placement constructed, so a refused invalidation fails with `MapPlacementError::DirtyState` without creating a Placement or consuming an id; otherwise successful creation assigns the next stable `PlacementId`, starting at 1 and increasing monotonically, never reused;
 - `Map::set<LayerT>(position, value)` is implemented as the first mutable world-state path: bounds check first, then `ensure_resident<LayerT>()` installs a clean plane when the chunk is missing, and `Cache::set<LayerT>()` mutates the resident value and marks the plane dirty only when the value actually changes; the dirty resident value is authoritative for subsequent reads of that Chunk; failure carries the exact `MapError` (`OutOfBounds`, the exact lower-level source error, or `CacheFull`), and dirty state is never a `MapError`;
-- `Map::flush<LayerT>()`/`flush_all()` are implemented as the explicit dirty-state write-back (D-38): fixed-capacity dirty-plane enumeration, fresh backing re-resolution through the normal resolution chain, in-Map cell comparison, clean-marking without any write when the plane has net returned to its backing answer, otherwise persisting exactly the differing cells through the bound runtime source, and a dedicated `MapPersistenceResult` result domain that adds no `MapError` value;
+- `Map::flush<LayerT>()`/`flush_all()` are implemented as the explicit dirty-state write-back (D-38, D-39): fixed-capacity dirty-plane enumeration, fresh backing re-resolution through the normal resolution chain, in-Map cell comparison, clean-marking without any write when the plane has net returned to its backing answer, preflight of every differing live value for runtime encodability before any binding or storage work, otherwise persisting exactly the differing cells through the bound runtime source — materializing a reserved-but-absent source lazily from the complete Map area when needed — and a dedicated `MapPersistenceResult` result domain that adds no `MapError` value;
 - public lookup is const-only (`placement(PlacementId)` returns a bounded pointer, `nullptr` for unknown ids); `set_position()`, `set_rotation()`, `set_reflection()`, and `set_orientation()` return `MapPlacementMutationResult = std::expected<void, MapPlacementMutationError>`, reject unknown ids with `UnknownPlacement`, and mutate only when the requested value actually differs from the current one; a no-op transform request needs no invalidation and succeeds even while dirty state exists;
 - a placement change that alters the world composition currently invalidates the whole resident Cache before mutating the Placement, because transformed Patch coverage does not exist yet (D-33); the invalidation is dirty-safe (D-37) and a refusal surfaces as `MapPlacementMutationError::DirtyState` with the Placement left unchanged;
 - Map borrows two explicit storage roles: `const landor::storage::Storage&` for the authored read source (immutable; Map never writes it) and `landor::storage::Storage&` for the runtime overlay source (read resolution plus the explicit write-back target of D-38); both are the build-selected `landor::storage::Storage` alias (currently `StorageFilesystem`), both are borrowed and outlive the Map, and the same Storage object may legitimately fill both roles;
 - Map also borrows the runtime layer binding catalogue: `std::span<const RuntimeLayerBinding>` scoped to this Map instance, where a binding `{ layer, source }` identifies the logical runtime/materialised overlay source of `(Map::id(), layer)` in the runtime storage role (see `src/world/runtime_layer_source.hpp`, D-35); the constructor asserts that every binding names a layer supported by the Map type and that no LayerId appears twice in the span — a duplicate is invalid configuration, not a precedence case; zero bindings means this Map currently has no persistent runtime overlay source for those layers, not that the layer is unsupported;
-- authored resolution (`open_layer_source()`/`read_cells()` inside `resolve_chunk<LayerT>()` for Placement sources) uses the authored storage only, and runtime overlay resolution (D-36) uses the runtime storage only: when a runtime binding names the layer, the bound source is opened and validated once per missing layer Chunk and its non-space cells resolve their cells ahead of authored state; when no binding names the layer the runtime storage is never inspected; the explicit write-back (D-38) uses the runtime storage only, writing exactly the dirty plane's differing cells to the bound source;
+- authored resolution (`open_layer_source()`/`read_cells()` inside `resolve_chunk<LayerT>()` for Placement sources) uses the authored storage only, and runtime overlay resolution (D-36) uses the runtime storage only: when a runtime binding names the layer and the bound source physically exists, the bound source is opened and validated once per missing layer Chunk and its non-space cells resolve their cells ahead of authored state; when a binding names the layer but the source does not exist yet, the runtime pass is skipped (reserved-but-unmaterialized, D-39); when no binding names the layer the runtime storage is never inspected; the explicit write-back (D-38) uses the runtime storage only, writing exactly the dirty plane's differing cells to the bound source and materializing a bound-but-absent source lazily before writing (D-39);
 - Map carries an explicit typed terminal fallback dependency: a `FallbackT` template parameter constrained by `LayerFallbackProvider<FallbackT, CoordT, Layers...>` (see `src/world/layer_fallback.hpp`). The provider is queried per layer and per world coordinate and returns exactly `LayerT::value_type`; it represents procedural baseline generation or a fixed layer default behind one small operation. Map borrows one provider object as `const` and owns it not, and exposes no accessor for it. `value<LayerT>()` and `at()` query the provider per layer and per unresolved in-Map cell during chunk-plane resolution, behind both the runtime overlay (D-36) and the authored Placement chain (D-34).
 
 The checked Map access result/error contract is now pinned in `src/world/map_result.hpp`: `Map::at()` returns `MapResult<tile_type>` and `Map::value<LayerT>()` returns `MapResult<LayerT::value_type>`, with `MapError = std::variant<MapErrorCode, LayerSourceError, AuthoredLayerSourceError, RuntimeLayerSourceError>`. Map-local failures are `OutOfBounds` (the coordinate is outside the Map, detected before Cache/Storage work) and `CacheFull` (the bounded Cache cannot accept another spatial slot and has no eviction policy yet); source failures keep their exact lower-level domains: the exact `LayerSourceError` for `.layer` parser/read failures in any source role, the exact `AuthoredLayerSourceError` for authored Patch/source geometry failures, and the exact `RuntimeLayerSourceError` for runtime Map/source geometry failures (D-36). `storage::Error` never surfaces directly; the layer source reader already maps Storage failures to `LayerSourceError::StorageFailed`.
@@ -227,8 +228,9 @@ identity.
 
 The contract pins the logical source only: the source may be much larger than
 RAM and never has to be loaded, rewritten or materialised in whole, and
-Storage may represent it however its backend requires. No filename,
-SourceId allocation/registration or creation policy is defined yet.
+Storage may represent it however its backend requires. No filename is pinned,
+and SourceId allocation/registration remain a composition-time concern outside
+Map; the creation policy itself is implemented (D-39).
 `validate_runtime_layer_source()` checks an already-parsed
 `LayerSourceLayout` against the Map area with the same defensive numeric style
 as the authored validator: wide signed intermediates, no
@@ -243,17 +245,23 @@ authoritative current world value for its cell and outranks every authored
 Placement and the fallback; a space runtime cell (`0x20`) contributes nothing,
 so the cell continues to authored Placements and then to the fallback. A
 missing binding is normal absence (no runtime overlay for that layer);
-a present binding whose source cannot be opened, parsed or validated is a
-checked-access failure that propagates the exact `LayerSourceError` or
-`RuntimeLayerSourceError` instead of falling through. For one missing layer
-Chunk the bound runtime source is opened and validated exactly once, before
-any per-cell reading, and when the runtime overlay resolves every logical
-cell of the Chunk no authored source is opened and the fallback is never
-queried. The explicit write-back now uses this seam (D-38): `Map::flush<LayerT>()`
-persists exactly the dirty plane's differing cells to the bound runtime
-source through `write_cells()`, marks the plane clean only when the whole
-plane succeeds, never writes the authored role, and does not create or
-register sources. Mutable state exists as dirty resident Cache planes
+a present binding whose source does not exist yet is a reserved,
+unmaterialized identity, not an error — the runtime pass is skipped and the
+authored chain answers (D-39); and a present binding whose existing source
+cannot be opened, parsed or validated is a checked-access failure that
+propagates the exact `LayerSourceError` or `RuntimeLayerSourceError` instead
+of falling through. For one missing layer Chunk the bound runtime source is
+opened and validated exactly once, before any per-cell reading, and when the
+runtime overlay resolves every logical cell of the Chunk no authored source
+is opened and the fallback is never queried. The explicit write-back now uses
+this seam (D-38, D-39): `Map::flush<LayerT>()` persists exactly the dirty
+plane's differing cells to the bound runtime source through `write_cells()`,
+preflighting encodability before any binding or storage work, and materializes
+a bound-but-absent source lazily from the complete Map area when the plane
+genuinely differs; it marks the plane clean only when the whole plane
+succeeds and never writes the authored role. SourceId allocation and
+registration remain composition-time concerns: Map neither allocates ids nor
+derives filenames. Mutable state exists as dirty resident Cache planes
 (D-37): `Map::set<LayerT>()` marks a resident layer plane dirty, the dirty
 value is authoritative for subsequent reads of that Chunk, dirty-safe
 invalidation refuses to discard it, and only the explicit write-back clears
@@ -323,15 +331,25 @@ A story-facing identity over one or more `PlacementId`s. It is intentionally sep
 read(SourceId, Offset, span<byte>)
 write(SourceId, Offset, span<const byte>)
 size(SourceId, Size&)
+exists(SourceId, bool&)
+create(SourceId, Size, std::byte)
 ```
 
-Operations are whole-range success/failure. Physical paths, file handles, sectors, pages, erase blocks, and similar platform details stay below the boundary.
+Reads, writes and size queries are whole-range success/failure. `exists()`
+reports absence as success with `false`; a present non-regular file and a
+backend that cannot determine state are failures. `create()` makes a
+missing source of the exact requested size filled with one initial value,
+never replaces an existing source (`already_exists`), and removes any
+partial file on failure. Physical paths, file handles, sectors, pages, erase
+blocks, and similar platform details stay below the boundary.
 
 `StorageFilesystem` is no longer contract-only. The current `.cpp` implements:
 
 - `read()`;
 - `write()`;
-- `size()`.
+- `size()`;
+- `exists()`;
+- `create()`.
 
 Reads and writes enforce logical range bounds and do not expose partial success.
 
@@ -377,6 +395,7 @@ The following are not implemented and should not be invented as collateral work:
 
 - cache replacement policy;
 - flush scheduling / automatic-flush policy and crash consistency (the explicit per-layer write-back itself is implemented per D-38);
+- runtime `SourceId` allocation/registration and runtime source filenames (the binding reserves the identity before the physical source exists, D-39);
 - procedural-state materialisation policy;
 - per-Placement transformed coverage for finer Cache invalidation (current placement mutations invalidate the whole resident Cache);
 - broader mutation APIs between simulations and live layer state (single-cell `Map::set<LayerT>()` is implemented);
@@ -387,7 +406,7 @@ The following are not implemented and should not be invented as collateral work:
 A sensible next sequence from the current tree is:
 
 1. fuse Map mutation, Cache mutation, dirty tracking and dirty-safe invalidation into one coherent change (the checked single-layer `value<LayerT>()` slice, the checked multi-layer `Map::at()`, the runtime overlay read resolution, and the first mutable world-state path `Map::set<LayerT>()` with per-plane dirty tracking and dirty-safe invalidation are now implemented and tested, D-36 and D-37);
-2. add the replacement policy only after the fixed-capacity no-eviction path is working (the explicit per-layer write-back is implemented as `Map::flush<LayerT>()`/`flush_all()`, D-38);
+2. add the replacement policy only after the fixed-capacity no-eviction path is working (the explicit per-layer write-back is implemented as `Map::flush<LayerT>()`/`flush_all()`, D-38, including lazy materialization of bound-but-absent sources, D-39);
 3. introduce `Region` only when a simulation needs an algorithmic working-area API;
 4. separately finish mechanical policy alignment in CMake, enum spelling, and test layout.
 

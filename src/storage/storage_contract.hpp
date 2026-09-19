@@ -56,6 +56,31 @@ namespace landor::storage
  * spare areas and similar implementation details remain hidden.
  *
  *
+ * exists()
+ * --------
+ *
+ * Reports whether the source currently has a normal resident form in the
+ * backend's physical representation.
+ *
+ * Success always writes the answer into result and means the backend was
+ * able to determine that state reliably. Absence is a success outcome with
+ * result = false, not an error. A backend that cannot determine the state
+ * reliably reports an error instead of guessing absence.
+ *
+ *
+ * create()
+ * --------
+ *
+ * Creates a new source of exactly size bytes whose every byte initially
+ * holds initial_value.
+ *
+ * Success means the source now exists at the configured identity and that
+ * subsequent size(), read() and write() calls can address it normally.
+ *
+ * create() must not replace a source that already exists. The caller
+ * decides what an already-existing source means for its own workflow.
+ *
+ *
  * Lifetime and initialization
  * ---------------------------
  *
@@ -77,7 +102,10 @@ concept StorageBackend =
         const T& const_storage,
         SourceId source,
         Offset offset,
-        Size& source_size,
+        Size source_size,
+        Size& resolved_size,
+        bool& exists_result,
+        std::byte initial_value,
         std::span<std::byte> destination,
         std::span<const std::byte> data)
 {
@@ -90,7 +118,15 @@ concept StorageBackend =
     } -> std::same_as<Result>;
 
     {
-        const_storage.size(source, source_size)
+        const_storage.size(source, resolved_size)
+    } -> std::same_as<Result>;
+
+    {
+        const_storage.exists(source, exists_result)
+    } -> std::same_as<Result>;
+
+    {
+        storage.create(source, source_size, initial_value)
     } -> std::same_as<Result>;
 };
 

@@ -221,9 +221,10 @@ using MapPlacementMutationResult =
  * authored reference, and the bound runtime overlay is opened and read
  * through the runtime reference (see resolve_chunk<LayerT>()). Map writes
  * the runtime role only through the explicit write-back flush<LayerT>()
- * (D-38); the authored role is never written. Runtime SourceId allocation,
- * registration and file creation for new overlays remain open (see
- * LAYER_STORAGE_MODEL.md).
+ * (D-38); the authored role is never written. A bound-but-absent runtime
+ * source is created lazily by flush<LayerT>() when a genuine dirty
+ * difference needs it (D-39); SourceId allocation and registration for new
+ * overlays remain open composition-time concerns (see LAYER_STORAGE_MODEL.md).
  *
  * Storage abstracts where those bytes physically live.
  *
@@ -266,18 +267,21 @@ using MapPlacementMutationResult =
  * Zero bindings means this Map currently has no persistent runtime overlay
  * source for those layers. That is not the same as an unsupported layer.
  *
- * Reads consult the catalogue: when a binding names a layer being resolved,
- * resolve_chunk<LayerT>() opens the bound runtime source through the runtime
- * storage role, validates it once against the Map area and reads the
- * still-unresolved in-Map cells from it. A non-space runtime cell is
- * authoritative over all authored Placements and the fallback (D-36); a
- * space runtime cell contributes nothing and resolution continues downward.
+ * Reads consult the catalogue: when a binding names a layer being resolved
+ * and its physical source is present, resolve_chunk<LayerT>() opens the
+ * bound runtime source through the runtime storage role, validates it once
+ * against the Map area and reads the still-unresolved in-Map cells from it.
+ * A non-space runtime cell is authoritative over all authored Placements
+ * and the fallback (D-36); a space runtime cell contributes nothing and
+ * resolution continues downward. A bound source whose physical source is
+ * absent has not been materialized yet and contributes nothing, so
+ * resolution continues to authored Placements and the fallback (D-39).
  * The write path is the explicit write-back flush<LayerT>() (D-38): it
- * persists a
- * dirty plane through the bound runtime source, writing only the cells that
- * differ from freshly resolved backing state. SourceId allocation,
- * registration and file creation for new overlays remain open (see
- * LAYER_STORAGE_MODEL.md).
+ * persists a dirty plane through the bound runtime source, writing only the
+ * cells that differ from freshly resolved backing state, and materializes
+ * the physical source lazily when it is still absent (D-39). SourceId
+ * allocation and registration for new overlays remain open composition-time
+ * concerns (see LAYER_STORAGE_MODEL.md).
  *
  *
  * Placements
@@ -631,20 +635,25 @@ public:
      *      backing answer: the plane is marked clean through
      *      mark_clean<LayerT>() without any write, binding lookup or
      *      Storage I/O.
-     *   5. Otherwise the layer's runtime binding is required. A missing
+     *   5. Every differing live value is preflighted before any binding,
+     *      materialization or write: a value that cannot be stored as a
+     *      version 1.0 runtime contribution byte (ASCII space 0x20 means
+     *      "no contribution" and LF 0x0A is structural, so neither can
+     *      express an override) fails the flush with
+     *      MapPersistenceErrorCode::UnencodableValue, writes nothing for
+     *      that plane, creates no source and leaves the plane dirty.
+     *   6. Otherwise the layer's runtime binding is required. A missing
      *      binding fails the flush with
      *      MapPersistenceErrorCode::MissingRuntimeBinding and leaves the
-     *      plane dirty and authoritative. A present binding is opened
-     *      exactly once per flush<LayerT>() call through
-     *      open_layer_source() and validated once against the Map area
-     *      through validate_runtime_layer_source(), and that parsed layout
-     *      is reused for the remaining dirty Chunks of the call.
-     *   6. Every differing live value is preflighted before any write: a
-     *      value that cannot be stored as a version 1.0 runtime
-     *      contribution byte (ASCII space 0x20 means "no contribution" and
-     *      LF 0x0A is structural, so neither can express an override) fails
-     *      the flush with MapPersistenceErrorCode::UnencodableValue, writes
-     *      nothing for that plane and leaves the plane dirty.
+     *      plane dirty and authoritative. A present binding's source is
+     *      resolved exactly once per flush<LayerT>() call: a source that is
+     *      already present is opened through open_layer_source() and
+     *      validated once against the Map area through
+     *      validate_runtime_layer_source(), while a reserved-but-absent
+     *      source is materialized lazily through
+     *      materialize_runtime_layer_source() from the complete Map area
+     *      (D-39). The resulting parsed layout is reused for the
+     *      remaining dirty Chunks of the call.
      *   7. Only the differing cells are then persisted through
      *      write_cells(): adjacent differing cells of one row are
      *      coalesced into bounded writes, and the world-to-source-local
@@ -718,40 +727,10 @@ public:
                 continue;
             }
 
-            // Step 5: a genuine difference needs the bound runtime source.
-            // The binding is looked up once per flush<LayerT>() call...
-            if (binding == nullptr)
-            {
-                binding = runtime_binding<LayerT>();
-                if (binding == nullptr)
-                {
-                    return std::unexpected(
-                        MapPersistenceErrorCode::MissingRuntimeBinding);
-                }
-
-                // ...and the source is opened and validated once, then the
-                // parsed layout is reused for the remaining dirty Chunks
-                // of this call.
-                const auto opened =
-                    open_layer_source(m_runtime_storage, binding->source);
-                if (!opened)
-                {
-                    return std::unexpected(opened.error());
-                }
-
-                const auto validated =
-                    validate_runtime_layer_source(m_area, *opened);
-                if (!validated)
-                {
-                    return std::unexpected(validated.error());
-                }
-
-                layout = *opened;
-            }
-
-            // Step 6: preflight the differing live values before any write:
-            // a value that cannot be stored as a v1 runtime contribution
-            // aborts the plane without touching the source.
+            // Step 5: preflight the differing live values before any
+            // binding, materialization or write: a value that cannot be
+            // stored as a v1 runtime contribution aborts the plane without
+            // creating a source or touching one.
             for (std::uint32_t y = 0; y < CacheChunkSide; ++y)
             {
                 for (std::uint32_t x = 0; x < CacheChunkSide; ++x)
@@ -772,6 +751,64 @@ public:
                         return std::unexpected(
                             MapPersistenceErrorCode::UnencodableValue);
                     }
+                }
+            }
+
+            // Step 6: a genuine difference needs the runtime binding. The
+            // binding is looked up once per flush<LayerT>() call...
+            if (binding == nullptr)
+            {
+                binding = runtime_binding<LayerT>();
+                if (binding == nullptr)
+                {
+                    return std::unexpected(
+                        MapPersistenceErrorCode::MissingRuntimeBinding);
+                }
+
+                // ...then the bound source is resolved once: a source that
+                // is already present is opened and validated, while a
+                // reserved-but-absent source is materialized lazily from
+                // the complete Map area (D-39). The resulting parsed layout
+                // is reused for the remaining dirty Chunks of this call.
+                bool source_present = false;
+                const auto present = m_runtime_storage.exists(
+                    binding->source, source_present);
+                if (!present)
+                {
+                    // The backend could not determine the state reliably;
+                    // that is a checked-source failure, not absence.
+                    return std::unexpected(LayerSourceError::StorageFailed);
+                }
+
+                if (source_present)
+                {
+                    const auto opened =
+                        open_layer_source(m_runtime_storage, binding->source);
+                    if (!opened)
+                    {
+                        return std::unexpected(opened.error());
+                    }
+
+                    const auto validated =
+                        validate_runtime_layer_source(m_area, *opened);
+                    if (!validated)
+                    {
+                        return std::unexpected(validated.error());
+                    }
+
+                    layout = *opened;
+                }
+                else
+                {
+                    const auto created = materialize_runtime_layer_source(
+                        m_runtime_storage, binding->source, m_area);
+                    if (!created)
+                    {
+                        return std::unexpected(
+                            persistence_error(created.error()));
+                    }
+
+                    layout = *created;
                 }
             }
 
@@ -1185,9 +1222,11 @@ private:
      * intentionally linear. Do not add indexing machinery without a measured
      * reason.
      *
-     * Reads consult the binding: resolve_chunk<LayerT>() opens the bound
-     * runtime source exactly once per chunk resolution and validates it once
-     * against the Map area. No write path consults it yet.
+     * Reads consult the binding: when the bound source is physically
+     * present, resolve_chunk<LayerT>() opens it exactly once per chunk
+     * resolution and validates it once against the Map area. The write path
+     * consults it through the explicit write-back flush<LayerT>() (D-38,
+     * including the lazy materialization of D-39).
      */
     [[nodiscard]] constexpr const RuntimeLayerBinding*
     runtime_binding(LayerId layer) const noexcept
@@ -1234,11 +1273,14 @@ private:
      * and the fallback (D-36); a space runtime cell contributes nothing and
      * resolution continues downward. When no binding exists for the layer the
      * runtime role is never inspected and resolution starts at the authored
-     * Placements. A present binding is not optional: a bound source that
-     * cannot be opened or read fails the whole resolution with the exact
-     * LayerSourceError, and a runtime source whose geometry disagrees with
-     * the Map area fails with the exact RuntimeLayerSourceError. Only the
-     * absence of a binding skips the runtime pass.
+     * Placements. A present binding whose physical source exists is not
+     * optional: a bound source that cannot be opened or read fails the whole
+     * resolution with the exact LayerSourceError, and a runtime source whose
+     * geometry disagrees with the Map area fails with the exact
+     * RuntimeLayerSourceError. The runtime pass is skipped only when no
+     * binding exists for the layer or when the bound source has not been
+     * materialized yet; a bound-but-absent source is a reserved identity,
+     * not an error (D-39).
      *
      * Authored precedence follows stable Placement identity rather than
      * array slot order: a higher PlacementId has higher precedence, so a
@@ -1316,15 +1358,37 @@ private:
         std::array<std::uint32_t, plane_cells> local_y {};
         std::byte cell {};
 
-        // Runtime overlay pass: the bound source for this layer, when one
-        // exists, is opened and geometry-validated once per Chunk resolution,
-        // then read cell by cell through the streaming reader. There is no
-        // runtime-vs-runtime precedence: one Map layer has at most one
+        // Runtime overlay pass: the bound source for this layer, when a
+        // binding exists and its physical source is present, is opened and
+        // geometry-validated once per Chunk resolution, then read cell by
+        // cell through the streaming reader. A bound-but-absent source has
+        // not been materialized yet and contributes nothing (D-39). There is
+        // no runtime-vs-runtime precedence: one Map layer has at most one
         // runtime source (D-35).
-        if (const auto* binding = runtime_binding<LayerT>())
+        const RuntimeLayerBinding* runtime_source_binding =
+            runtime_binding<LayerT>();
+        bool source_present = false;
+
+        // A reserved binding may not have a physical source yet: an absent
+        // source means the overlay has not been materialized, so the runtime
+        // pass contributes nothing and resolution continues to authored
+        // Placements and the fallback (D-39).
+        if (runtime_source_binding != nullptr)
+        {
+            const auto present = m_runtime_storage.exists(
+                runtime_source_binding->source, source_present);
+            if (!present)
+            {
+                // The backend could not determine the state reliably;
+                // that is a checked-source failure, not absence.
+                return std::unexpected(LayerSourceError::StorageFailed);
+            }
+        }
+
+        if (runtime_source_binding != nullptr && source_present)
         {
             const auto opened =
-                open_layer_source(m_runtime_storage, binding->source);
+                open_layer_source(m_runtime_storage, runtime_source_binding->source);
             if (!opened)
             {
                 return std::unexpected(opened.error());
@@ -1376,7 +1440,7 @@ private:
                     const auto read = read_cells(
                         *opened,
                         m_runtime_storage,
-                        binding->source,
+                        runtime_source_binding->source,
                         local_y[index],
                         local_x[index],
                         std::span<std::byte>(&cell, 1));
@@ -1762,6 +1826,27 @@ private:
 
 
     /**
+     * Carry a runtime materialization failure into the persistence error
+     * domain.
+     *
+     * materialize_runtime_layer_source() can only fail with the exact
+     * LayerSourceError or RuntimeLayerSourceError; both already belong to
+     * the persistence domain and pass through unchanged.
+     */
+    [[nodiscard]] static MapPersistenceError
+    persistence_error(
+        std::variant<LayerSourceError, RuntimeLayerSourceError> error)
+    {
+        if (const auto* layer_error = std::get_if<LayerSourceError>(&error))
+        {
+            return *layer_error;
+        }
+
+        return std::get<RuntimeLayerSourceError>(error);
+    }
+
+
+    /**
      * One step of the multi-layer flush walk (flush_all()): flush one layer
      * and, on failure, record its exact error so the walk can fail fast in
      * declared layer order.
@@ -1833,8 +1918,10 @@ private:
      *
      * Resolution reads the bound runtime overlay through it inside
      * resolve_chunk<LayerT>(); write-back writes through it only through
-     * the explicit flush<LayerT>() (D-38, see LAYER_STORAGE_MODEL.md). The
-     * same Storage object may legitimately fill both roles.
+     * the explicit flush<LayerT>() (D-38, see LAYER_STORAGE_MODEL.md), and
+     * flush<LayerT>() also creates a bound-but-absent runtime source
+     * through it when lazily materializing one (D-39). The same Storage
+     * object may legitimately fill both roles.
      */
     storage::Storage& m_runtime_storage;
 
@@ -1846,12 +1933,14 @@ private:
      *
      * Borrowed; the backing records outlive the Map. Zero bindings means
      * this Map currently has no persistent runtime overlay source for those
-     * layers, not that the layers are unsupported; a present binding is
-     * consulted by reads and must open and validate.
+     * layers, not that the layers are unsupported.
      *
-     * resolve_chunk<LayerT>() looks the layer's binding up and reads the
-     * bound source through m_runtime_storage. The write path consults it
-     * through the explicit write-back flush<LayerT>() (D-38, see
+     * A present binding reserves the runtime source identity before its
+     * physical source exists (D-39): reads consult it only when the bound
+     * source is physically present, and the write path consults it through
+     * the explicit write-back flush<LayerT>() (D-38), which materializes an
+     * absent bound source when a genuine dirty difference needs it. A
+     * present bound source that does exist must open and validate (see
      * LAYER_STORAGE_MODEL.md).
      */
     std::span<const RuntimeLayerBinding> m_runtime_layers;

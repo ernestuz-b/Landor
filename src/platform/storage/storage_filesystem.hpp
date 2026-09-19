@@ -100,6 +100,41 @@ public:
         Size& result) const noexcept;
 
 
+    /**
+     * Report whether the source currently has a normal resident form.
+     *
+     * Returns Error::invalid_source when source is outside the source table,
+     * Error::read_failed when the filesystem state cannot be determined
+     * reliably, or success with result set to the answer. A missing source
+     * is success with result = false, not an error. An existing path that is
+     * not a regular file (for example a directory) is a failure, not a
+     * disguised absence.
+     */
+    [[nodiscard]] Result exists(
+        SourceId source,
+        bool& result) const noexcept;
+
+
+    /**
+     * Create a new source of exactly size bytes whose every byte initially
+     * holds initial_value.
+     *
+     * Returns Error::invalid_source when source is outside the source table,
+     * Error::already_exists when a source already exists at the configured
+     * path (it is left untouched), or an appropriate failure when creation
+     * cannot be completed.
+     *
+     * Parent directories of a nested relative path are created when they do
+     * not exist yet. If creation fails after the file has been started, the
+     * partial file is removed as a best effort so a failed create() does not
+     * leave a half-formed source behind.
+     */
+    [[nodiscard]] Result create(
+        SourceId source,
+        Size size,
+        std::byte initial_value) noexcept;
+
+
 private:
     /**
      * Return the configured relative path for a source.

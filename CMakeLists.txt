@@ -111,6 +111,7 @@ if(LANDOR_BUILD_TESTS)
         tests/world/test_map_at.cpp
         tests/world/test_map_storage_roles.cpp
         tests/world/test_runtime_layer_source.cpp
+        tests/world/test_runtime_layer_materialization.cpp
         tests/world/test_map_runtime_catalogue.cpp
         tests/world/test_map_runtime_overlay.cpp
 

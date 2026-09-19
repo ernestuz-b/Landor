@@ -22,8 +22,10 @@
 namespace
 {
 
+using landor::geo::Coord32;
 using landor::geo::LayerSourceError;
 using landor::geo::LayerSourceLayout;
+using landor::geo::create_blank_layer_source;
 using landor::geo::has_contribution;
 using landor::geo::open_layer_source;
 using landor::geo::read_cells;
@@ -64,6 +66,14 @@ public:
     void set_bytes(std::string bytes)
     {
         m_bytes = std::move(bytes);
+        m_source_present = true;
+    }
+
+    /// Forget the in-memory source: the backend then reports absence.
+    void set_source_absent()
+    {
+        m_bytes.clear();
+        m_source_present = false;
     }
 
     void fail_size_with(Error error)
@@ -79,6 +89,16 @@ public:
     void fail_writes_with(Error error)
     {
         m_write_error = error;
+    }
+
+    void fail_exists_with(Error error)
+    {
+        m_exists_error = error;
+    }
+
+    void fail_create_with(Error error)
+    {
+        m_create_error = error;
     }
 
     [[nodiscard]] Result read(
@@ -160,6 +180,44 @@ public:
         return Result{};
     }
 
+    [[nodiscard]] Result exists(SourceId source, bool& result) const
+    {
+        if (source != k_source)
+        {
+            return Result{Error::invalid_source};
+        }
+
+        if (m_exists_error != Error::none)
+        {
+            return Result{m_exists_error};
+        }
+
+        result = m_source_present;
+        return Result{};
+    }
+
+    [[nodiscard]] Result create(SourceId source, Size size, std::byte value)
+    {
+        if (source != k_source)
+        {
+            return Result{Error::invalid_source};
+        }
+
+        if (m_create_error != Error::none)
+        {
+            return Result{m_create_error};
+        }
+
+        if (m_source_present)
+        {
+            return Result{Error::already_exists};
+        }
+
+        m_bytes.assign(size, static_cast<char>(value));
+        m_source_present = true;
+        return Result{};
+    }
+
     [[nodiscard]] const std::vector<ReadRequest>& requests() const
     {
         return m_requests;
@@ -198,11 +256,14 @@ public:
 
 private:
     std::string m_bytes;
+    bool m_source_present = false;
     mutable std::vector<ReadRequest> m_requests;
     std::vector<WriteRequest> m_writes;
     Error m_size_error = Error::none;
     Error m_read_error = Error::none;
     Error m_write_error = Error::none;
+    Error m_exists_error = Error::none;
+    Error m_create_error = Error::none;
 };
 
 
@@ -1485,4 +1546,177 @@ TEST(LayerSource, WriteMapsTerminatorReadStorageFailure)
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error(), LayerSourceError::StorageFailed);
     EXPECT_TRUE(storage.writes().empty());
+}
+
+
+// ---------------------------------------------------------------------------
+// create_blank_layer_source
+// ---------------------------------------------------------------------------
+
+
+TEST(LayerSource, CreateBlankMakesAnExactlySpecifiedDenseV1Source)
+{
+    RecordingStorage storage;
+    storage.set_source_absent();
+
+    const auto result = create_blank_layer_source(
+        storage, k_source, /*width=*/7, /*height=*/5, Coord32(-2, 3));
+
+    ASSERT_TRUE(result);
+
+    const auto& layout = *result;
+    EXPECT_EQ(layout.version_major, 1);
+    EXPECT_EQ(layout.version_minor, 0);
+    EXPECT_EQ(layout.width, 7u);
+    EXPECT_EQ(layout.height, 5u);
+    EXPECT_EQ(layout.natural_position, Coord32(-2, 3));
+
+    // "V:1.0\nD:7 5\nP:-2 3\n\n" is exactly 20 bytes.
+    EXPECT_EQ(layout.data_offset, Offset {20});
+    EXPECT_EQ(layout.row_stride, Offset {8});
+    EXPECT_EQ(layout.expected_size, Size {60});
+    EXPECT_EQ(layout.source_size, Size {60});
+
+    // The exact metadata: the V / D / P records plus the terminating
+    // blank line.
+    EXPECT_EQ(storage.bytes().substr(0, 20), "V:1.0\nD:7 5\nP:-2 3\n\n");
+
+    // Every cell is the no-contribution byte and every row terminator is LF.
+    for (std::uint32_t y = 0; y < 5; ++y)
+    {
+        for (std::uint32_t x = 0; x < 7; ++x)
+        {
+            EXPECT_EQ(
+                storage.bytes()[static_cast<std::size_t>(20 + y * 8 + x)],
+                ' ');
+        }
+
+        EXPECT_EQ(storage.bytes()[static_cast<std::size_t>(20 + y * 8 + 7)],
+                  '\n');
+    }
+
+    // The created source reopens through the existing reader.
+    const auto reopened = open_layer_source(storage, k_source);
+    ASSERT_TRUE(reopened);
+    EXPECT_EQ(reopened->width, layout.width);
+    EXPECT_EQ(reopened->height, layout.height);
+    EXPECT_EQ(reopened->natural_position, layout.natural_position);
+}
+
+
+TEST(LayerSource, CreateBlankReadsBackThroughTheStreamingReader)
+{
+    RecordingStorage storage;
+    storage.set_source_absent();
+
+    const auto result = create_blank_layer_source(
+        storage, k_source, /*width=*/12, /*height=*/34, Coord32(0, -1));
+
+    ASSERT_TRUE(result);
+
+    // A whole row of the blank source reads back as all no-contribution
+    // cells through the streaming reader.
+    std::array<std::byte, 12> row {};
+    const auto read = read_cells(
+        *result, storage, k_source, /*row=*/5, /*x=*/0,
+        std::span<std::byte>(row));
+    ASSERT_TRUE(read);
+
+    for (const auto cell : row)
+    {
+        EXPECT_EQ(cell, std::byte {0x20});
+        EXPECT_FALSE(has_contribution(cell));
+    }
+}
+
+
+TEST(LayerSource, CreateBlankRejectsZeroDimensionsWithoutTouchingStorage)
+{
+    RecordingStorage storage;
+    storage.set_source_absent();
+
+    for (const auto& dimensions :
+         {std::pair<std::uint32_t, std::uint32_t> {0, 1},
+          std::pair<std::uint32_t, std::uint32_t> {1, 0}})
+    {
+        const auto result = create_blank_layer_source(
+            storage,
+            k_source,
+            dimensions.first,
+            dimensions.second,
+            Coord32(0, 0));
+
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error(), LayerSourceError::ZeroDimension);
+    }
+
+    // Nothing was created or written.
+    bool present = true;
+    ASSERT_TRUE(storage.exists(k_source, present));
+    EXPECT_FALSE(present);
+    EXPECT_TRUE(storage.requests().empty());
+    EXPECT_TRUE(storage.writes().empty());
+}
+
+
+TEST(LayerSource, CreateBlankRejectsAnOverflowingSourceSize)
+{
+    RecordingStorage storage;
+    storage.set_source_absent();
+
+    // 65536 rows of 65537 bytes exceeds the Size maximum.
+    const auto result = create_blank_layer_source(
+        storage, k_source, 65536, 65536, Coord32(0, 0));
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), LayerSourceError::Overflow);
+
+    bool present = true;
+    ASSERT_TRUE(storage.exists(k_source, present));
+    EXPECT_FALSE(present);
+}
+
+
+TEST(LayerSource, CreateBlankMapsStorageCreateFailure)
+{
+    RecordingStorage storage;
+    storage.set_source_absent();
+    storage.fail_create_with(Error::no_space);
+
+    const auto result = create_blank_layer_source(
+        storage, k_source, 4, 3, Coord32(0, 0));
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), LayerSourceError::StorageFailed);
+}
+
+
+TEST(LayerSource, CreateBlankMapsAnExistingSourceAsStorageFailure)
+{
+    RecordingStorage storage;
+    // A pre-existing source must never be replaced.
+    storage.set_bytes(make_default_source());
+
+    const auto result = create_blank_layer_source(
+        storage, k_source, 2, 2, Coord32(0, 0));
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), LayerSourceError::StorageFailed);
+
+    // The existing source is untouched.
+    EXPECT_EQ(storage.bytes(), make_default_source());
+}
+
+
+TEST(LayerSource, CreateBlankMapsMetadataWriteFailure)
+{
+    RecordingStorage storage;
+    storage.set_source_absent();
+    storage.fail_writes_with(Error::write_failed);
+
+    const auto result = create_blank_layer_source(
+        storage, k_source, 4, 3, Coord32(0, 0));
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), LayerSourceError::StorageFailed);
 }

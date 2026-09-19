@@ -8,7 +8,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <limits>
 #include <span>
+#include <variant>
 
 
 namespace landor::geo
@@ -59,8 +61,10 @@ struct RuntimeLayerBinding
  */
 enum class RuntimeLayerSourceError : std::uint8_t
 {
-    /// The Map area is empty. A dense runtime source cannot represent an
-    /// empty Map; nothing is translated or normalized.
+    /// The Map area cannot be represented by a dense v1 runtime source:
+    /// the area is empty, its extent exceeds the dense v1 per-axis
+    /// uint32 cell count, or its minimum does not fit the source's
+    /// Coord32 position. Nothing is translated or normalized.
     InvalidMapGeometry,
 
     /// The source `D` dimensions differ from the Map area extent.
@@ -161,6 +165,95 @@ validate_runtime_layer_source(
     }
 
     return {};
+}
+
+
+/**
+ * Lazily materialise the runtime overlay source of one Map layer.
+ *
+ * Creates the blank dense v1 runtime source for the complete Map area —
+ * `P` = the Map area minimum, `D` = the Map area extent, every cell the
+ * ASCII space (0x20) no-contribution byte (D-39) — and verifies the created
+ * source against the same geometry contract that
+ * validate_runtime_layer_source() applies to runtime sources.
+ *
+ * The helper does not replace an existing source (the underlying create()
+ * will not), makes no path or filename decision above Storage, and performs
+ * no SourceId allocation or registration: the caller passes the identity the
+ * Map's runtime binding already reserved for this layer.
+ *
+ * Error mapping: a Map area the dense v1 source cannot represent fails with
+ * RuntimeLayerSourceError::InvalidMapGeometry without touching Storage;
+ * format/storage-level failures from create_blank_layer_source() pass
+ * through as LayerSourceError; a created source that failed the runtime
+ * geometry contract passes through as RuntimeLayerSourceError.
+ */
+template<storage::StorageBackend Backend, typename CoordT>
+[[nodiscard]] std::expected<
+    LayerSourceLayout,
+    std::variant<LayerSourceError, RuntimeLayerSourceError>>
+materialize_runtime_layer_source(
+    Backend& storage,
+    storage::SourceId source,
+    const Area<CoordT>& map_area)
+{
+    using MaterializeError = std::variant<LayerSourceError, RuntimeLayerSourceError>;
+
+    // Same geometry contract as validation: reject an unrepresentable Map
+    // area before creating anything.
+    if (map_area.is_empty())
+    {
+        return std::unexpected(MaterializeError(RuntimeLayerSourceError::InvalidMapGeometry));
+    }
+
+    const std::int64_t width =
+        static_cast<std::int64_t>(map_area.max().x())
+        - static_cast<std::int64_t>(map_area.min().x()) + 1;
+    const std::int64_t height =
+        static_cast<std::int64_t>(map_area.max().y())
+        - static_cast<std::int64_t>(map_area.min().y()) + 1;
+
+    // A dense v1 source holds at most uint32 cells per axis; a wider Map is
+    // a geometry the dense format cannot represent, so it is a
+    // RuntimeLayerSourceError rather than a format Overflow.
+    if (width > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max())
+        || height > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max()))
+    {
+        return std::unexpected(MaterializeError(RuntimeLayerSourceError::InvalidMapGeometry));
+    }
+
+    // The source position is a Coord32: the Map minimum must fit it exactly,
+    // compared in a wide intermediate rather than cast and wrapped.
+    const auto min_x = map_area.min().x();
+    const auto min_y = map_area.min().y();
+    if (static_cast<std::int64_t>(min_x) < static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::min())
+        || static_cast<std::int64_t>(min_x) > static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max())
+        || static_cast<std::int64_t>(min_y) < static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::min())
+        || static_cast<std::int64_t>(min_y) > static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max()))
+    {
+        return std::unexpected(MaterializeError(RuntimeLayerSourceError::InvalidMapGeometry));
+    }
+
+    const auto layout = create_blank_layer_source(
+        storage,
+        source,
+        static_cast<std::uint32_t>(width),
+        static_cast<std::uint32_t>(height),
+        Coord32(static_cast<std::int32_t>(min_x), static_cast<std::int32_t>(min_y)));
+    if (!layout)
+    {
+        return std::unexpected(MaterializeError(layout.error()));
+    }
+
+    // Defensive: a source derived from the same area must satisfy the
+    // runtime geometry contract. Keep the exact error if it ever does not.
+    const auto validated = validate_runtime_layer_source(map_area, *layout);
+    if (!validated)
+    {
+        return std::unexpected(MaterializeError(validated.error()));
+    }
+
+    return *layout;
 }
 
 

@@ -659,4 +659,216 @@ TEST_F(StorageFilesystemTest, DoesNotCreateAMissingConfiguredFileOnWrite)
     EXPECT_FALSE(std::filesystem::exists(m_root_path / "missing.layer"));
 }
 
+
+TEST_F(StorageFilesystemTest, ExistsReportsPresenceForExistingFiles)
+{
+    write_file("present.layer", 64);
+    write_file("empty.layer", 0);
+
+    const Storage storage = make_storage();
+
+    bool present{};
+    const Result present_result = storage.exists(SourceId {0}, present);
+    EXPECT_TRUE(present_result);
+    EXPECT_EQ(present_result.error, Error::none);
+    EXPECT_TRUE(present);
+
+    // An existing empty file is still a present source.
+    bool empty{};
+    const Result empty_result = storage.exists(SourceId {2}, empty);
+    EXPECT_TRUE(empty_result);
+    EXPECT_TRUE(empty);
+}
+
+
+TEST_F(StorageFilesystemTest, ExistsReportsAbsenceWithoutFailing)
+{
+    const Storage storage = make_storage();
+
+    bool absent{};
+    const Result result = storage.exists(SourceId {1}, absent);
+
+    // Absence is a success outcome, not an error.
+    EXPECT_TRUE(result);
+    EXPECT_EQ(result.error, Error::none);
+    EXPECT_FALSE(absent);
+}
+
+
+TEST_F(StorageFilesystemTest, ExistsRejectsASourceIdOutsideTheSourceTable)
+{
+    const Storage storage = make_storage();
+
+    bool out{};
+    for (const SourceId source : {SourceId {4}, SourceId {0xFFFF}})
+    {
+        const Result result = storage.exists(source, out);
+        EXPECT_FALSE(result);
+        EXPECT_EQ(result.error, Error::invalid_source);
+    }
+}
+
+
+TEST_F(StorageFilesystemTest, ExistsFailsWhenTheConfiguredPathIsADirectory)
+{
+    std::error_code ec;
+    ASSERT_TRUE(std::filesystem::create_directories(m_root_path / "missing.layer", ec))
+        << ec.message();
+
+    const Storage storage = make_storage();
+
+    // A directory at the configured path cannot represent a normal source:
+    // the backend fails instead of masquerading it as absence.
+    bool out{};
+    const Result result = storage.exists(SourceId {1}, out);
+
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error, Error::read_failed);
+}
+
+
+TEST_F(StorageFilesystemTest, CreatesAMissingSourceWithTheExactSizeAndFillValue)
+{
+    Storage storage = make_storage();
+
+    constexpr Size fill_size {1000};
+    const Result result =
+        storage.create(SourceId {1}, fill_size, std::byte {0x20});
+
+    EXPECT_TRUE(result);
+    EXPECT_EQ(result.error, Error::none);
+
+    // The new source is addressable through the existing operations.
+    bool present{};
+    const Result present_result = storage.exists(SourceId {1}, present);
+    EXPECT_TRUE(present_result);
+    EXPECT_TRUE(present);
+
+    Size size{};
+    const Result size_result = storage.size(SourceId {1}, size);
+    EXPECT_TRUE(size_result);
+    EXPECT_EQ(size, fill_size);
+
+    std::vector<std::byte> contents(fill_size);
+    const Result read_result =
+        storage.read(SourceId {1}, Offset {0}, std::span<std::byte> {contents});
+    EXPECT_TRUE(read_result);
+    for (const auto byte : contents)
+    {
+        EXPECT_EQ(byte, std::byte {0x20});
+    }
+
+    // The new source also accepts writes through the ordinary path.
+    const std::vector<std::byte> data = make_replacement(4);
+    const Result write_result =
+        storage.write(SourceId {1}, Offset {10}, std::span<const std::byte> {data});
+    EXPECT_TRUE(write_result);
+    EXPECT_EQ(read_full_source(storage, SourceId {1})[10 + 2], data[2]);
+}
+
+
+TEST_F(StorageFilesystemTest, CreateReportsAlreadyExistsAndLeavesTheSourceUntouched)
+{
+    const std::vector<std::byte> pattern = make_pattern(32);
+    write_bytes("present.layer", std::span<const std::byte> {pattern});
+
+    Storage storage = make_storage();
+
+    const Result result =
+        storage.create(SourceId {0}, Size {8}, std::byte {0x20});
+
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error, Error::already_exists);
+
+    // The existing source was not replaced, truncated or rewritten.
+    EXPECT_EQ(read_full_source(storage, SourceId {0}), pattern);
+}
+
+
+TEST_F(StorageFilesystemTest, CreateRejectsASourceIdOutsideTheSourceTable)
+{
+    Storage storage = make_storage();
+
+    for (const SourceId source : {SourceId {4}, SourceId {0xFFFF}})
+    {
+        const Result result = storage.create(source, Size {8}, std::byte {0x20});
+        EXPECT_FALSE(result);
+        EXPECT_EQ(result.error, Error::invalid_source);
+    }
+}
+
+
+TEST_F(StorageFilesystemTest, CreatesAnEmptySourceForZeroSize)
+{
+    Storage storage = make_storage();
+
+    const Result result = storage.create(SourceId {1}, Size {0}, std::byte {0x20});
+
+    EXPECT_TRUE(result);
+    EXPECT_EQ(result.error, Error::none);
+
+    Size size{};
+    const Result size_result = storage.size(SourceId {1}, size);
+    EXPECT_TRUE(size_result);
+    EXPECT_EQ(size, Size {0});
+}
+
+
+TEST_F(StorageFilesystemTest, CreateCreatesParentDirectoriesForNestedPaths)
+{
+    // A separate table with one nested relative path: the parent directory
+    // does not exist yet and must be created by create().
+    constexpr std::string_view nested_sources [] = {"nested/dir/new.layer"};
+    Storage storage {m_root, std::span<const std::string_view> {nested_sources}};
+
+    const Result result = storage.create(SourceId {0}, Size {16}, std::byte {0x20});
+
+    EXPECT_TRUE(result);
+    EXPECT_EQ(result.error, Error::none);
+    EXPECT_EQ(read_full_source(storage, SourceId {0}).size(), std::size_t {16});
+}
+
+
+TEST_F(StorageFilesystemTest, CreateFailsWhenTheParentPathIsAFile)
+{
+    write_file("present.layer", 64);
+
+    // The nested relative path's parent is an existing regular file, so the
+    // parent directory cannot be created. The failure must not create a
+    // partial source and must not touch the parent file.
+    constexpr std::string_view nested_sources [] = {"present.layer/sub.layer"};
+    Storage storage {m_root, std::span<const std::string_view> {nested_sources}};
+
+    const Result result = storage.create(SourceId {0}, Size {16}, std::byte {0x20});
+
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error, Error::write_failed);
+    EXPECT_FALSE(std::filesystem::exists(m_root_path / "present.layer" / "sub.layer"));
+
+    Size size{};
+    const Result size_result = storage.size(SourceId {0}, size);
+    EXPECT_FALSE(size_result);
+
+    // The parent file is untouched.
+    EXPECT_EQ(read_full_source(make_storage(), SourceId {0}).size(), std::size_t {64});
+}
+
+
+TEST_F(StorageFilesystemTest, CreateFailsWhenTheConfiguredPathIsADirectory)
+{
+    std::error_code ec;
+    ASSERT_TRUE(std::filesystem::create_directories(m_root_path / "missing.layer", ec))
+        << ec.message();
+
+    Storage storage = make_storage();
+
+    const Result result = storage.create(SourceId {1}, Size {16}, std::byte {0x20});
+
+    // A directory at the configured path is not a source that create() may
+    // replace, and creation cannot complete over it.
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error, Error::write_failed);
+    EXPECT_TRUE(std::filesystem::is_directory(m_root_path / "missing.layer"));
+}
+
 } // namespace

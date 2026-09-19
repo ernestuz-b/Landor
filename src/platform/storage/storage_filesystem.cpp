@@ -1,5 +1,7 @@
 #include "platform/storage/storage_filesystem.hpp"
 
+#include <algorithm>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -116,6 +118,169 @@ Result StorageFilesystem::write(SourceId source, Offset offset,
 
     return Result{Error::none};
 }
+
+Result StorageFilesystem::exists(
+    SourceId source,
+    bool& result) const noexcept
+{
+    const auto* relative = relative_path(source);
+    if (relative == nullptr)
+    {
+        return Result{Error::invalid_source};
+    }
+
+    const auto physical = std::filesystem::path(m_root) / *relative;
+
+    std::error_code ec;
+    const auto present = std::filesystem::exists(physical, ec);
+    if (ec)
+    {
+        // The filesystem state could not be determined reliably; do not
+        // guess absence.
+        return Result{Error::read_failed};
+    }
+
+    if (!present)
+    {
+        // Absence is a success outcome, not an error.
+        result = false;
+        return Result{Error::none};
+    }
+
+    // A path that exists but is not a regular file (for example a
+    // directory) cannot represent a normal source; fail rather than
+    // masquerade as absence.
+    const auto regular = std::filesystem::is_regular_file(physical, ec);
+    if (ec || !regular)
+    {
+        return Result{Error::read_failed};
+    }
+
+    result = true;
+    return Result{Error::none};
+}
+
+
+Result StorageFilesystem::create(
+    SourceId source,
+    Size size,
+    std::byte initial_value) noexcept
+{
+    const auto* relative = relative_path(source);
+    if (relative == nullptr)
+    {
+        return Result{Error::invalid_source};
+    }
+
+    const auto physical = std::filesystem::path(m_root) / *relative;
+
+    // Never replace something already at the configured path. The existence
+    // check is the guard against overwriting an existing source; it is
+    // followed immediately by the open below.
+    std::error_code ec;
+    const auto present = std::filesystem::exists(physical, ec);
+    if (ec)
+    {
+        return Result{Error::read_failed};
+    }
+
+    if (present)
+    {
+        const auto regular = std::filesystem::is_regular_file(physical, ec);
+        if (ec)
+        {
+            return Result{Error::read_failed};
+        }
+
+        if (regular)
+        {
+            return Result{Error::already_exists};
+        }
+
+        // A directory or other non-file entry: creation cannot complete.
+        return Result{Error::write_failed};
+    }
+
+    // Parent directories of a nested relative path are created when they do
+    // not exist yet; create_directories succeeds when they already exist.
+    if (physical.has_parent_path())
+    {
+        std::error_code parent_ec;
+        std::filesystem::create_directories(physical.parent_path(), parent_ec);
+        if (parent_ec)
+        {
+            return Result{Error::write_failed};
+        }
+    }
+
+    // If creation fails after the file has been started, remove the partial
+    // file as a best effort so a failed create() does not leave a
+    // half-formed source that a later exists() would report.
+    const auto cleanup_partial = [&physical]() noexcept
+    {
+        std::error_code remove_ec;
+        std::filesystem::remove(physical, remove_ec);
+    };
+
+    // Truncation is safe here because existence was checked just above: it
+    // guarantees the stream starts from an empty file, so a failed fill can
+    // never mix stale bytes with the newly created source. Standard
+    // std::fstream does not expose the underlying failure reason, so every
+    // open or write failure is reported as write_failed, the same way
+    // write() does.
+    std::ofstream stream(
+        physical,
+        std::ios::out | std::ios::binary | std::ios::trunc);
+    if (!stream)
+    {
+        cleanup_partial();
+        return Result{Error::write_failed};
+    }
+
+    // Fill the source with the requested initial byte in fixed-size blocks
+    // without a whole-file image in RAM.
+    constexpr std::size_t k_fill_block_bytes = 4096;
+    std::array<std::byte, k_fill_block_bytes> block{};
+    std::fill(block.begin(), block.end(), initial_value);
+
+    for (Size remaining = size; remaining != 0;)
+    {
+        const auto chunk =
+            remaining < k_fill_block_bytes ? remaining : k_fill_block_bytes;
+        stream.write(
+            reinterpret_cast<const char*>(block.data()),
+            static_cast<std::streamsize>(chunk));
+        if (stream.fail())
+        {
+            cleanup_partial();
+            return Result{Error::write_failed};
+        }
+
+        remaining -= chunk;
+    }
+
+    // close() flushes the stream; a failure there means the fill did not
+    // complete.
+    stream.close();
+    if (stream.fail())
+    {
+        cleanup_partial();
+        return Result{Error::write_failed};
+    }
+
+    // Success must mean subsequent size()/read()/write() can address the
+    // source normally: verify the promised size exactly.
+    std::error_code verify_ec;
+    const auto final_size = std::filesystem::file_size(physical, verify_ec);
+    if (verify_ec || final_size != static_cast<std::uintmax_t>(size))
+    {
+        cleanup_partial();
+        return Result{Error::write_failed};
+    }
+
+    return Result{Error::none};
+}
+
 
 Result StorageFilesystem::size(
     SourceId source,

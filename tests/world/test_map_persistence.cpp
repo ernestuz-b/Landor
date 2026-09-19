@@ -651,12 +651,21 @@ TEST_F(MapPersistenceTest, UnencodableValueLeavesThePlaneDirty)
 
 // --- Lower-level error propagation -----------------------------------------------------
 
-// A bound-but-absent runtime source fails the flush with the exact
-// LayerSourceError from opening.
-TEST_F(MapPersistenceTest, BoundButAbsentRuntimeSourceFailsFlush)
-{
-    write_runtime(runtime_rows_16x16(' ', 0, 0));
+// --- Lazy runtime materialization -----------------------------------------
+//
+// D-39: a present binding whose source does not exist yet reserves the
+// layer's runtime persistence identity; the first flush that carries a
+// genuine difference materializes it lazily.
 
+
+// The first flush carrying a genuine difference materializes the
+// reserved-but-absent runtime source: before the flush no source file
+// exists, and after it a blank dense v1 source covering exactly the Map
+// area holds the mutated cell. A fresh Map sees the persisted override.
+TEST_F(MapPersistenceTest, BoundButAbsentRuntimeSourceMaterializesOnFirstRealChange)
+{
+    // No runtime file for the bound SourceId; everything resolves from the
+    // fallback.
     Storage authored_storage {m_authored_root, m_sources};
     Storage runtime_storage {m_runtime_root, m_sources};
     ConstantFallback7 fallback {};
@@ -672,18 +681,148 @@ TEST_F(MapPersistenceTest, BoundButAbsentRuntimeSourceFailsFlush)
 
     const auto before = map.value<Terrain>(k_probe);
     ASSERT_TRUE(before.has_value());
+    EXPECT_EQ(*before, 7);
+    EXPECT_FALSE(std::filesystem::exists(m_runtime_root_path / m_sources[2]));
+
+    ASSERT_TRUE(map.set<Terrain>(k_probe, static_cast<std::uint8_t>('B')));
+    EXPECT_TRUE(map.flush<Terrain>());
+
+    // The materialized source is the blank 16x16 overlay anchored at the
+    // Map area plus exactly the mutated cell.
+    EXPECT_EQ(
+        read_file(m_runtime_root_path, 2),
+        make_layer_file(16, 16, 0, 0, runtime_rows_16x16('B', 2, 1)));
+
+    // A fresh Map sees the persisted override through the ordinary read
+    // path.
+    const TerrainMap fresh_map {
+        1,
+        k_map_area,
+        std::span<const Patch> {m_patches},
+        authored_storage,
+        runtime_storage,
+        runtime_span(),
+        fallback
+    };
+    const auto after = fresh_map.value<Terrain>(k_probe);
+    ASSERT_TRUE(after.has_value());
+    EXPECT_EQ(*after, static_cast<std::uint8_t>('B'));
+}
+
+
+// A flush that carries no genuine difference never materializes a
+// reserved-but-absent source: neither a flush with no dirty work at all
+// nor a net-restored change may create the file.
+TEST_F(MapPersistenceTest, BoundButAbsentRuntimeSourceIsNotMaterializedWithoutRealChange)
+{
+    Storage authored_storage {m_authored_root, m_sources};
+    Storage runtime_storage {m_runtime_root, m_sources};
+    ConstantFallback7 fallback {};
+    TerrainMap map {
+        1,
+        k_map_area,
+        std::span<const Patch> {m_patches},
+        authored_storage,
+        runtime_storage,
+        runtime_span(),
+        fallback
+    };
+
+    const auto before = map.value<Terrain>(k_probe);
+    ASSERT_TRUE(before.has_value());
+    EXPECT_EQ(*before, 7);
+
+    // Case 1: no dirty work at all.
+    EXPECT_TRUE(map.flush<Terrain>());
+    EXPECT_FALSE(std::filesystem::exists(m_runtime_root_path / m_sources[2]));
+
+    // Case 2: a change that nets back to the backing answer.
+    ASSERT_TRUE(map.set<Terrain>(k_probe, static_cast<std::uint8_t>('B')));
+    ASSERT_TRUE(map.set<Terrain>(k_probe, *before));
+    EXPECT_TRUE(map.flush<Terrain>());
+    EXPECT_FALSE(std::filesystem::exists(m_runtime_root_path / m_sources[2]));
+
+    // The plane is clean: a placement creation is allowed.
+    ASSERT_TRUE(map.place(k_patch_id, Coord32(12, 12)));
+}
+
+
+// A flush that fails preflight with an unencodable live value must not
+// materialize the reserved-but-absent source: preflight happens before the
+// binding lookup and any Storage work.
+TEST_F(MapPersistenceTest, UnencodableValueDoesNotMaterializeABoundButAbsentSource)
+{
+    Storage authored_storage {m_authored_root, m_sources};
+    Storage runtime_storage {m_runtime_root, m_sources};
+    ConstantFallback7 fallback {};
+    TerrainMap map {
+        1,
+        k_map_area,
+        std::span<const Patch> {m_patches},
+        authored_storage,
+        runtime_storage,
+        runtime_span(),
+        fallback
+    };
+
+    // 0x0A differs from the fallback (7) but is structural in version 1.0.
+    ASSERT_TRUE(map.set<Terrain>(k_probe, 0x0A));
+
+    const auto flushed = map.flush<Terrain>();
+    ASSERT_FALSE(flushed);
+    const auto* code = std::get_if<MapPersistenceErrorCode>(&flushed.error());
+    ASSERT_NE(code, nullptr);
+    EXPECT_EQ(*code, MapPersistenceErrorCode::UnencodableValue);
+
+    // No source was created and the plane remains dirty.
+    EXPECT_FALSE(std::filesystem::exists(m_runtime_root_path / m_sources[2]));
+    const auto dirty_probe = map.place(k_patch_id, Coord32(12, 12));
+    ASSERT_FALSE(dirty_probe);
+    EXPECT_EQ(dirty_probe.error(), MapPlacementError::DirtyState);
+}
+
+
+// An existing runtime source that is malformed is reported with its exact
+// error and is not replaced by a freshly materialized one: the flush fails
+// and the file bytes survive unchanged.
+TEST_F(MapPersistenceTest, ExistingMalformedRuntimeSourceIsNotReplacedOnFlush)
+{
+    Storage authored_storage {m_authored_root, m_sources};
+    Storage runtime_storage {m_runtime_root, m_sources};
+    ConstantFallback7 fallback {};
+    TerrainMap map {
+        1,
+        k_map_area,
+        std::span<const Patch> {m_patches},
+        authored_storage,
+        runtime_storage,
+        runtime_span(),
+        fallback
+    };
+
+    // No runtime file yet: make the plane resident and dirty.
+    const auto before = map.value<Terrain>(k_probe);
+    ASSERT_TRUE(before.has_value());
     ASSERT_TRUE(map.set<Terrain>(k_probe, static_cast<std::uint8_t>('B')));
 
-    // Remove the overlay after the plane is resident and dirty.
-    std::error_code ec;
-    std::filesystem::remove(m_runtime_root_path / m_sources[2], ec);
-    ASSERT_FALSE(ec) << ec.message();
+    // The bound source now exists in a malformed state: an unsupported
+    // version record over an otherwise valid 16x16 body.
+    std::string malformed = "V:2.0\nD:16 16\nP:0 0\n\n";
+    for (const auto& row : runtime_rows_16x16(' ', 0, 0))
+    {
+        malformed += row;
+        malformed += '\n';
+    }
+    write_source(m_runtime_root_path, 2, malformed);
 
     const auto flushed = map.flush<Terrain>();
     ASSERT_FALSE(flushed);
     const auto* src = std::get_if<LayerSourceError>(&flushed.error());
     ASSERT_NE(src, nullptr);
-    EXPECT_EQ(*src, LayerSourceError::StorageFailed);
+    EXPECT_EQ(*src, LayerSourceError::UnsupportedVersion);
+
+    // The malformed file was neither replaced nor rewritten.
+    EXPECT_EQ(read_file(m_runtime_root_path, 2), malformed);
 
     // The plane remains dirty: a placement creation is refused.
     const auto dirty_probe = map.place(k_patch_id, Coord32(12, 12));

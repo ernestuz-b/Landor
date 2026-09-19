@@ -57,6 +57,10 @@ enum class Error : std::uint8_t
     read_only,
     no_space,
 
+    /// create() found that a source already exists at its configured path;
+    /// the existing source was left untouched.
+    already_exists,
+
     read_failed,
     write_failed
 };

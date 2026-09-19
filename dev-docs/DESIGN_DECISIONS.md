@@ -340,7 +340,7 @@ Map carries the binding catalogue as a borrowed `std::span<const RuntimeLayerBin
 - the existing dense `.layer` format and direct addressing remain usable for the runtime role without new physical assumptions;
 - the runtime backing source may be much larger than RAM without being loaded, rewritten or materialised in whole, and Storage remains free to represent the logical source however its backend requires.
 
-The decision pins the **logical** source. It does not require a filesystem backend to allocate or load the complete object in RAM, and it does not pin physical file naming, `SourceId` allocation/registration, file creation, or write-back policy.
+The decision pins the **logical** source. It does not require a filesystem backend to allocate or load the complete object in RAM, and it does not pin physical file naming or `SourceId` allocation/registration. The creation policy for a bound-but-absent source is pinned separately by D-39.
 
 ## D-36 — Runtime materialized state precedes authored and fallback state
 
@@ -357,9 +357,9 @@ A non-space runtime cell is the authoritative current world value for its cell: 
 
 For one missing layer Chunk the bound runtime source is opened and geometry-validated exactly once, before any per-cell reading; the per-cell loop then issues bounded `read_cells()` reads through the shared reader, never touching Storage directly. Cache padding cells outside `Map::area()` are never runtime-read, authored-read or fallback-generated: they remain value-initialized.
 
-A missing binding (`runtime_binding<LayerT>() == nullptr`) is normal absence: no runtime overlay exists for that Map layer, and authored/fallback resolution is exactly as before. A present binding whose source cannot be opened, parsed or geometry-validated is a real checked-access failure — the exact `LayerSourceError` or `RuntimeLayerSourceError` propagates instead of falling through to authored state. When the runtime overlay resolves every logical cell of the requested Chunk, no authored source is opened and the fallback is never queried; when it resolves only some cells, authored resolution sees only the still-unresolved cells through the existing resolved-mask seam.
+A missing binding (`runtime_binding<LayerT>() == nullptr`) is normal absence: no runtime overlay exists for that Map layer, and authored/fallback resolution is exactly as before. A present binding whose source does not exist yet is a reserved, unmaterialized identity, not an error (D-39): the runtime pass is skipped and the cell continues to authored Placements and then to the fallback. A present binding whose existing source cannot be opened, parsed or geometry-validated is a real checked-access failure — the exact `LayerSourceError` or `RuntimeLayerSourceError` propagates instead of falling through to authored state. When the runtime overlay resolves every logical cell of the requested Chunk, no authored source is opened and the fallback is never queried; when it resolves only some cells, authored resolution sees only the still-unresolved cells through the existing resolved-mask seam.
 
-Runtime sources are read-only from Map's perspective in this decision: it pins read resolution only. No mutation, dirty state, write-back, runtime file creation or `SourceId` allocation is introduced.
+This decision pins read resolution only. Mutation, dirty state, write-back and lazy materialisation of the bound source are pinned by D-37, D-38 and D-39.
 
 ## D-37 — A dirty resident plane is never silently discarded
 
@@ -382,23 +382,45 @@ Placement creation and transform mutation consume the refusal in their own manag
 **Decision:** Map adds an explicit, layer-scoped write-back. `Map::flush<LayerT>()` collects the dirty resident `LayerT` Chunks through `Cache::dirty_chunks<LayerT>()` into fixed-capacity stack storage, re-resolves each dirty plane's fresh backing answer directly through the existing resolution chain (never through the dirty resident Cache), and compares the live plane with that answer over the logical in-Map cells only:
 
 - when no cell differs, the live state has net returned to its backing answer: the plane is marked clean through `Cache::mark_clean<LayerT>()` with no binding lookup, no source open and no Storage I/O;
-- otherwise the layer's runtime binding is required; a missing binding fails with `MapPersistenceErrorCode::MissingRuntimeBinding` and leaves the plane dirty and authoritative;
-- a present binding is opened exactly once per call through `open_layer_source()` and geometry-validated exactly once through `validate_runtime_layer_source()`, and the parsed layout is reused for the remaining dirty Chunks of the call;
-- every differing live value is preflighted before any write of the plane: a value that cannot be stored as a version 1.0 runtime contribution byte (ASCII space `0x20` means "no contribution" and LF `0x0A` is structural, so neither can express an override) fails the plane with `MapPersistenceErrorCode::UnencodableValue`, writes nothing and leaves the plane dirty;
-- only the differing cells are then persisted through the shared reader's new bounded `write_cells()`: adjacent differing cells of one row are coalesced into a single write, and the world-to-source-local translation stays in wide signed intermediates;
+- otherwise every differing live value is preflighted before any binding lookup, materialisation or write of the plane: a value that cannot be stored as a version 1.0 runtime contribution byte (ASCII space `0x20` means "no contribution" and LF `0x0A` is structural, so neither can express an override) fails the plane with `MapPersistenceErrorCode::UnencodableValue`, creates no source, writes nothing and leaves the plane dirty;
+- the layer's runtime binding is then required; a missing binding fails with `MapPersistenceErrorCode::MissingRuntimeBinding` and leaves the plane dirty and authoritative;
+- the bound source is resolved exactly once per call: an existing source is opened through `open_layer_source()` and geometry-validated exactly once through `validate_runtime_layer_source()`, while a reserved-but-absent source is materialized lazily through `materialize_runtime_layer_source()` (D-39); the parsed layout is reused for the remaining dirty Chunks of the call;
+- only the differing cells are then persisted through the shared reader's bounded `write_cells()`: adjacent differing cells of one row are coalesced into a single write, and the world-to-source-local translation stays in wide signed intermediates;
 - the plane is marked clean only after the whole plane write succeeds; any lower-level failure leaves it dirty and authoritative.
 
 `Map::flush_all()` walks the declared template layer order and fails fast: a later layer may fail after earlier layers have already been persisted and cleaned. There is deliberately no cross-layer transaction.
 
 Resolution failures carry their exact lower-level error domains: `LayerSourceError` (opening, parsing or writing a `.layer` source, in either role), `AuthoredLayerSourceError` (authored Patch/source geometry) and `RuntimeLayerSourceError` (runtime Map/source geometry) propagate unchanged, and `storage::Error` never surfaces. The result is the dedicated `MapPersistenceResult`/`MapPersistenceError` domain of `src/world/map_persistence.hpp`: `MapPersistenceErrorCode` holds only the two flush-local outcomes, and the variant preserves the exact source errors. No `MapError`/`MapErrorCode` value is introduced and checked-access semantics are unchanged.
 
-Flush intentionally does none of the following: it does not create or register runtime sources (a bound-but-absent source fails the flush), does not evict or replace resident planes, does not run automatically on `set()` or placement mutation, does not write the authored role (authored storage remains read-only from Map), does not write whole planes (only differing cells), and does not provide crash atomicity.
+Flush intentionally does none of the following: it does not allocate `SourceId`s, register sources or derive filenames (the binding already carries the reserved identity; D-39), does not replace an existing source (a bound-but-absent source is materialized lazily, D-39), does not evict or replace resident planes, does not run automatically on `set()` or placement mutation, does not write the authored role (authored storage remains read-only from Map), does not write whole planes (only differing cells), and does not provide crash atomicity.
 
 **Why:**
 
 - dirty state is authoritative live state, so the only legitimate way to clear dirt is to persist the difference: a same-value restoration proves the plane has net returned to its backing answer without any write, while any real difference must reach the bound runtime source before the dirt may be cleared;
 - whole-plane comparison against a freshly resolved backing answer reuses the D-35/D-36 resolution contract instead of inventing shadow copies: it is bounded (one canonical Chunk at a time), allocation-free (fixed-capacity stack storage), and its target is always a fresh resolution, never a stale snapshot;
 - persisting only differing cells keeps the runtime source a sparse overrides document: untouched authored and fallback cells stay space ("no contribution") instead of being frozen into the overlay, and the authored file is never written;
-- preflighting encodability before any write keeps the plane atomic at flush granularity: one unencodable value fails the whole plane and leaves it dirty, never a half-written plane;
+- preflighting encodability before binding lookup, materialisation or any write keeps the plane atomic at flush granularity: one unencodable value fails the whole plane and leaves it dirty, never a half-written plane, and never a created source;
 - the dedicated persistence result domain keeps the D-34/D-36 error contract intact: flush composes the resolution chain and the bounded writer but does not flatten their exact errors;
 - keeping flush explicit (not automatic on mutation or placement change) preserves D-37's refusal semantics unchanged and leaves flush scheduling, crash consistency and replacement under dirty pressure as open stop conditions rather than guessed policy.
+
+## D-39 — A runtime binding reserves persistence identity; materialization is lazy
+
+**Decision:** a `RuntimeLayerBinding` reserves the `(MapId, LayerId)` persistence identity before the physical source exists. A present binding whose source does not exist yet is *reserved-but-unmaterialized*, not an error:
+
+- checked reads skip the runtime pass for that resolution entirely: authored Placements and then the terminal fallback answer (D-36);
+- `Map::flush<LayerT>()` materializes the source lazily on the first flush that carries a genuine dirty difference: `materialize_runtime_layer_source()` creates the blank dense v1 source from the complete Map area — `P` = the area minimum, `D` = the area extent, every cell the no-contribution space byte — through `Storage::create()` plus `create_blank_layer_source()`, reopens it through `open_layer_source()`, and passes the result through `validate_runtime_layer_source()`;
+- no flush without a genuine dirty difference creates a source, and an `UnencodableValue` preflight failure creates no source either: preflight happens before the binding lookup and before any Storage work (D-38);
+- an existing source is never replaced: `Storage::create()` reports `storage::Error::already_exists`, and a flush against an existing-but-malformed source fails with the exact `LayerSourceError` or `RuntimeLayerSourceError`, leaving the file bytes untouched;
+- Map allocates no `SourceId`s, registers no sources and derives no filenames: the binding carries the reserved identity, and SourceId allocation/registration remains a composition-time concern outside Map.
+
+The backend contract gains two operations for this seam: `exists(SourceId, bool&)`, where absence is success-with-false while an undeterminable state is a failure (a directory at the source path is not absence), and `create(SourceId, Size, std::byte)`, which makes a missing source of the exact requested size filled with one initial value, never overwrites, and removes any partial file on failure.
+
+**Why:**
+
+- a binding is a declaration of identity, not a promise of bytes: requiring the file to pre-exist would push source creation into the read/flush path with no settled answer for *when* the file is born; "the first genuine change" is a decision the design can pin down instead of guess;
+- lazy materialization keeps layers that are never mutated free of file creation, and the source appears exactly when something must be persisted into it;
+- the blank dense v1 source derived from the complete Map area is the only geometry D-35 determines without invention: `P`/`D` fall out of the Map area, and the no-contribution byte means the freshly created file changes the world's answer for no cell;
+- preflight before materialization means an unencodable mutation has no Storage side effect;
+- never replacing an existing source keeps materialization conservative: an existing-but-broken file is a deterministic diagnosis, not something to silently overwrite.
+
+**Consequences:** D-36's present-binding read rule splits into reserved-but-absent (skip) and existing-but-broken (exact failure); D-38's flush gains the lazy materialization step between preflight and the writes; `StorageBackend` grows `exists()`/`create()`; "bound-but-absent" is no longer a failure anywhere in Map.

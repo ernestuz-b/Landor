@@ -18,6 +18,11 @@
 // is pinned structurally (the single open/validate above the per-cell loop in
 // resolve_chunk<LayerT>()) rather than by a behavioural test; adding an
 // instrumentation seam to Storage is deliberately avoided.
+//
+// A present binding whose source does not exist yet is a reserved,
+// unmaterialized identity (D-39): the runtime pass is skipped for that
+// resolution and resolution continues to authored Placements and the
+// terminal fallback.
 
 #include <gtest/gtest.h>
 
@@ -541,12 +546,47 @@ TEST_F(MapRuntimeOverlayTest, RuntimePositionMismatchFailsExactly)
 }
 
 
-// A present binding whose runtime source is physically absent is an error,
-// not an absent overlay: the exact reader storage failure propagates and no
-// fall-through to authored state or the fallback happens.
-TEST_F(MapRuntimeOverlayTest, BoundRuntimeSourceAbsenceFails)
+// A present binding whose runtime source does not exist yet is a reserved,
+// unmaterialized identity, not an error: the runtime pass is skipped and
+// the authored Placement answers.
+TEST_F(MapRuntimeOverlayTest, BoundButAbsentRuntimeSourceFallsThroughToAuthored)
 {
+    const std::array<std::string, 4> authored_rows {"qwer", "tyAu", "opis", "dfgh"};
+    write_authored(authored_rows);
+
     // No runtime file is written for the bound SourceId.
+    Storage authored_storage {m_authored_root, m_sources};
+    Storage runtime_storage {m_runtime_root, m_sources};
+    ConstantFallback7 fallback {};
+    TerrainMap map {
+        1,
+        k_map_area,
+        std::span<const Patch> {m_patches},
+        authored_storage,
+        runtime_storage,
+        runtime_span(),
+        fallback
+    };
+
+    const auto placed = map.place(k_patch_id, Coord32(0, 0));
+    ASSERT_TRUE(placed.has_value());
+
+    const auto result = map.value<Terrain>(k_probe);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, static_cast<std::uint8_t>('A'));
+
+    // The checked read did not create the reserved source.
+    bool present = true;
+    ASSERT_TRUE(runtime_storage.exists(SourceId {2}, present));
+    EXPECT_FALSE(present);
+}
+
+
+// A present binding whose runtime source does not exist yet and no authored
+// contribution either: the terminal fallback answers.
+TEST_F(MapRuntimeOverlayTest, BoundButAbsentRuntimeSourceFallsThroughToFallback)
+{
+    // No authored Placement and no runtime file for the bound SourceId.
     Storage authored_storage {m_authored_root, m_sources};
     Storage runtime_storage {m_runtime_root, m_sources};
     ConstantFallback7 fallback {};
@@ -561,10 +601,13 @@ TEST_F(MapRuntimeOverlayTest, BoundRuntimeSourceAbsenceFails)
     };
 
     const auto result = map.value<Terrain>(k_probe);
-    ASSERT_FALSE(result.has_value());
-    const auto* error = std::get_if<landor::geo::LayerSourceError>(&result.error());
-    ASSERT_NE(error, nullptr);
-    EXPECT_EQ(*error, landor::geo::LayerSourceError::StorageFailed);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, 7);
+
+    // The checked read did not create the reserved source.
+    bool present = true;
+    ASSERT_TRUE(runtime_storage.exists(SourceId {2}, present));
+    EXPECT_FALSE(present);
 }
 
 

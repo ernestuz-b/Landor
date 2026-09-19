@@ -309,7 +309,7 @@ resident Cache
     -> terminal fallback provider (procedural baseline or layer default)
 ```
 
-The runtime overlay step (D-36) is live in checked reads: when a runtime layer binding names the layer, the bound runtime source is opened and validated once per missing layer Chunk, and every in-Map cell whose runtime byte is non-space resolves to that byte, authoritative over all authored Placements and the fallback. A space runtime cell (`0x20`) contributes nothing, so the cell continues downward. A missing binding means no runtime overlay exists for that layer, so authored/fallback behaviour is unchanged; a present binding whose source cannot be opened, parsed or validated is a checked-access error. The runtime source identity and geometry are pinned by D-35: one logical runtime overlay source per Map layer, covering the complete Map area with `P` = the Map area minimum and `D` = the Map area extent, world-oriented and independent of `CacheChunkSide`.
+The runtime overlay step (D-36) is live in checked reads: when a runtime layer binding names the layer and the bound source physically exists, the bound runtime source is opened and validated once per missing layer Chunk, and every in-Map cell whose runtime byte is non-space resolves to that byte, authoritative over all authored Placements and the fallback. A space runtime cell (`0x20`) contributes nothing, so the cell continues downward. A missing binding means no runtime overlay exists for that layer, so authored/fallback behaviour is unchanged; a present binding whose source does not exist yet is a reserved, unmaterialized identity (D-39), so the runtime pass is skipped and authored/fallback behaviour is unchanged; a present binding whose existing source cannot be opened, parsed or validated is a checked-access error. The runtime source identity and geometry are pinned by D-35: one logical runtime overlay source per Map layer, covering the complete Map area with `P` = the Map area minimum and `D` = the Map area extent, world-oriented and independent of `CacheChunkSide`. The explicit write-back (D-38) materializes a bound-but-absent source lazily through the same identity (D-39).
 
 A Placement declines a cell — resolution then continues downward — when its Patch has no binding for the layer, the world coordinate is outside its transformed Patch, or the authored cell is ASCII space `0x20`.
 
@@ -345,9 +345,11 @@ The platform-independent Storage contract currently provides:
 read
 write
 size
+exists
+create
 ```
 
-Reads and writes are whole-range operations: success means the requested logical range was fully transferred.
+Reads and writes are whole-range operations: success means the requested logical range was fully transferred. `exists()` reports absence as success-with-false, while a present non-regular file or an undeterminable state is a failure; `create()` makes a missing source of the exact requested size filled with one initial value, never replaces an existing source, and removes any partial file on failure (D-39).
 
 Physical representation stays below the boundary.
 
@@ -605,6 +607,7 @@ The following remain intentionally open:
 - exact source/layer/spatial-coordinate to byte-range mapping where not already defined by a concrete format;
 - Cache replacement policy;
 - flush scheduling / automatic-flush policy and crash consistency of the explicit write-back (the explicit per-layer flush itself is implemented per D-38);
+- SourceId allocation/registration policy for runtime sources (a binding reserves the identity before the physical source exists; D-39);
 - `Region` ownership/view/mutation semantics;
 - long-term repository relationship of `include/managed_heap/` (vendored vs submodule/subrepo);
 - exact logging record representation and formatter on embedded targets;
