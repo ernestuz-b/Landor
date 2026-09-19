@@ -33,24 +33,51 @@ using MapId = std::uint16_t;
 
 
 /**
- * Failure outcomes of Map placement management.
+ * Failure outcomes of Map placement creation.
  *
  * Placement creation is a Map-management operation, not checked world
  * access, so its failures do not share the MapError domain of
- * map_result.hpp. There are exactly two meaningful failures:
+ * map_result.hpp. There are exactly three meaningful failures:
  *
  *   - UnknownPatch: the PatchId is not present in this Map's catalogue;
- *   - CapacityFull: every fixed placement slot is already occupied.
+ *   - CapacityFull: every fixed placement slot is already occupied;
+ *   - DirtyState: the Placement would alter world composition, but current
+ *     dirty resident state cannot yet be safely discarded because the
+ *     whole-cache invalidation was refused.
+ *
+ * DirtyState belongs to placement management, not to checked Map access:
+ * Map::set() itself never fails because state is dirty, and dirty state
+ * therefore never appears in MapError.
  */
 enum class MapPlacementError : std::uint8_t
 {
     UnknownPatch,
-    CapacityFull
+    CapacityFull,
+    DirtyState
 };
 
 
 using MapPlacementResult =
     std::expected<PlacementId, MapPlacementError>;
+
+
+/**
+ * Failure outcomes of Map placement transform mutation.
+ *
+ *   - UnknownPlacement: the PlacementId is not live in this Map;
+ *   - DirtyState: the transform would alter world composition, but current
+ *     dirty resident state cannot yet be safely discarded because the
+ *     whole-cache invalidation was refused.
+ */
+enum class MapPlacementMutationError : std::uint8_t
+{
+    UnknownPlacement,
+    DirtyState
+};
+
+
+using MapPlacementMutationResult =
+    std::expected<void, MapPlacementMutationError>;
 
 
 /**
@@ -154,8 +181,9 @@ using MapPlacementResult =
  * Checked access
  * --------------
  *
- * Public Map access is checked. at() and value() must validate that the
- * coordinate belongs to this Map before performing cache or storage work.
+ * Public Map access is checked. at(), value() and set() must validate that
+ * the coordinate belongs to this Map before performing cache or storage
+ * work.
  *
  * There is deliberately no unchecked operator[] alternative. A Map access can
  * involve cache lookup, Chunk selection and storage I/O, so avoiding a couple
@@ -196,9 +224,14 @@ using MapPlacementResult =
  *
  * Storage abstracts where those bytes physically live.
  *
- * Altered layer state belongs to the working world. Changes may eventually be
- * written back to the runtime storage, but cache eviction and write-back
- * must never change the logical answer returned by Map.
+ * Altered layer state belongs to the working world. The first mutation path
+ * is implemented as Map::set<LayerT>(): it ensures the layer Chunk is
+ * resident, mutates the resident Cache value and marks that resident layer
+ * plane dirty (D-37). The dirty resident value is authoritative for
+ * subsequent reads of that Chunk without rereading runtime, authored or
+ * fallback state. No Storage write happens: a dirty plane cannot yet be
+ * persisted, and dirty-safe invalidation refuses any operation that would
+ * discard it until a write-back slice exists.
  *
  * Procedurally supplied regions may be materialised lazily when first changed.
  * The exact replacement and write-back policy lives below this interface.
@@ -260,11 +293,20 @@ using MapPlacementResult =
  * mutable access stays private so spatial mutation cannot bypass Map.
  *
  * Current invalidation policy: transformed Patch coverage is not calculated
- * yet, so a successful placement creation or an actual placement transform
- * change invalidates the entire resident Cache (invalidate_all()). This is
- * deliberately conservative and safe with the current Cache, which has no
- * dirty state yet; once transformed coverage exists, Map can narrow
- * invalidation to the affected areas.
+ * yet, so a placement creation or an actual placement transform change
+ * invalidates the entire resident Cache (invalidate_all()). The
+ * whole-cache invalidation is dirty-safe: when it would discard a dirty
+ * resident layer plane it is refused atomically, and the operation fails
+ * with MapPlacementError::DirtyState (creation) or
+ * MapPlacementMutationError::DirtyState (transform) without altering any
+ * Placement or Cache state. A no-op transform request needs no invalidation
+ * and therefore succeeds even while dirty state exists. Creation order is
+ * deterministic: PatchId validation, then capacity, then the invalidation,
+ * and only then the PlacementId assignment and Placement construction, so a
+ * refused invalidation consumes no PlacementId. Until a write-back slice can
+ * flush dirty planes first, Placement changes cannot proceed over dirty
+ * state; once transformed coverage exists, Map can narrow invalidation to
+ * the affected areas.
  *
  * Story systems do not belong here. They refer to PlacementIds through
  * world-facing Place objects; Map only deals with geometry and spatial state.
@@ -506,6 +548,59 @@ public:
 
 
     /**
+     * Mutate one live layer value at one coordinate.
+     *
+     * This is the first real mutable world-state path:
+     *
+     *     checked coordinate
+     *         -> ensure the layer Chunk is resident (backing resolution
+     *            installs a clean plane)
+     *         -> mutate the resident Cache value
+     *         -> mark that resident layer plane dirty
+     *
+     * The bounds check happens before any Cache, source or fallback work.
+     * Once the value changes, the resident Cache value is authoritative for
+     * subsequent reads of that Chunk: value<LayerT>() and at() return the
+     * mutated value without rereading runtime, authored or fallback state.
+     *
+     * Setting a value that already equals the current live state succeeds
+     * without creating dirty state; a plane that is already dirty stays
+     * dirty. A layer does not need a runtime binding to acquire live state:
+     * a missing binding only means there is no persistent runtime source
+     * yet, and the dirty plane simply cannot be persisted until a
+     * write-back slice exists. Dirty-safe invalidation keeps it from being
+     * discarded in the meantime.
+     *
+     * No Storage write happens here, and dirty state is not a failure of
+     * this operation. Failure carries the exact MapError from the seam that
+     * failed: MapErrorCode::OutOfBounds, the exact lower-level source error
+     * from resolution, or MapErrorCode::CacheFull.
+     */
+    template<Layer LayerT>
+        requires (std::same_as<LayerT, Layers> || ...)
+    [[nodiscard]] MapResult<void>
+    set(coord_type position, typename LayerT::value_type value)
+    {
+        // Checked mutation: the bounds decision happens before any cache,
+        // source or fallback work.
+        if (!contains(position))
+        {
+            return std::unexpected(MapErrorCode::OutOfBounds);
+        }
+
+        const auto resident = ensure_resident<LayerT>(position);
+        if (!resident)
+        {
+            return std::unexpected(resident.error());
+        }
+
+        m_cache.template set<LayerT>(position, value);
+
+        return {};
+    }
+
+
+    /**
      * Find an immutable authored Patch descriptor.
      *
      * Returns nullptr when the id is not present in this Map's catalogue.
@@ -530,9 +625,12 @@ public:
      * default `Orientation{}`, delegating to the explicit overload.
      *
      * Returns MapPlacementError::UnknownPatch when the PatchId is absent
-     * from this Map's catalogue, and MapPlacementError::CapacityFull when
-     * every placement slot is occupied. UnknownPatch is checked before
-     * capacity, so an invalid PatchId is never hidden by a full Map.
+     * from this Map's catalogue, MapPlacementError::CapacityFull when every
+     * placement slot is occupied, or MapPlacementError::DirtyState when the
+     * whole-cache invalidation would discard dirty resident state. Unknown
+     * Patch is checked before capacity and dirty state, so an invalid
+     * PatchId is never hidden by a full Map or a dirty Cache; a capacity
+     * failure is reported without attempting any invalidation.
      */
     [[nodiscard]] MapPlacementResult
     place(PatchId patch_id) noexcept
@@ -553,14 +651,17 @@ public:
      * Patch does not duplicate its layer data.
      *
      * On success a new live Placement occupies one fixed slot and the result
-     * carries its new stable PlacementId. Map then invalidates its currently
-     * resident data under the current conservative whole-cache policy (see
-     * the class documentation).
+     * carries its new stable PlacementId, assigned only after the whole-cache
+     * invalidation has succeeded (see the class documentation).
      *
      * Returns MapPlacementError::UnknownPatch when the PatchId is absent
-     * from this Map's catalogue, checked before capacity so it is never
-     * hidden by a full Map, or MapPlacementError::CapacityFull when every
-     * placement slot is already occupied.
+     * from this Map's catalogue, checked first so it is never hidden by a
+     * full Map or dirty state, MapPlacementError::CapacityFull when every
+     * placement slot is already occupied (reported without attempting any
+     * invalidation), or MapPlacementError::DirtyState when the whole-cache
+     * invalidation is refused because it would discard dirty resident
+     * state. A DirtyState failure creates no Placement, assigns no
+     * PlacementId and alters no Cache state.
      */
     [[nodiscard]] MapPlacementResult
     place(
@@ -568,6 +669,10 @@ public:
         coord_type position,
         Orientation orientation = {}) noexcept
     {
+        // Deterministic order: patch validation, then capacity, then the
+        // dirty-safe whole-cache invalidation, and only then the PlacementId
+        // assignment and Placement construction. A refused invalidation
+        // consumes no PlacementId and alters no Cache state.
         if (patch(patch_id) == nullptr)
             return std::unexpected(MapPlacementError::UnknownPatch);
 
@@ -584,14 +689,17 @@ public:
         if (slot == nullptr)
             return std::unexpected(MapPlacementError::CapacityFull);
 
+        // Current conservative policy: transformed coverage is not computed,
+        // so a new placement may affect any previously resident area. The
+        // invalidation is dirty-safe and may be refused while dirty state
+        // exists; the Placement is only created after it succeeds.
+        if (!invalidate_all())
+            return std::unexpected(MapPlacementError::DirtyState);
+
         const PlacementId id = m_next_placement_id;
         ++m_next_placement_id;
         slot->emplace(id, patch_id, position, orientation);
         ++m_placement_count;
-
-        // Current conservative policy: transformed coverage is not computed,
-        // so a new placement may affect any previously resident area.
-        invalidate_all();
 
         return id;
     }
@@ -628,25 +736,31 @@ public:
      *
      * The authored Patch remains unchanged.
      *
-     * Returns false for an unknown PlacementId. When the requested position
-     * already equals the current position the call returns true without
-     * invalidating; an actual move mutates the Placement and invalidates
-     * resident Map data.
+     * Returns MapPlacementMutationError::UnknownPlacement for an unknown
+     * PlacementId. When the requested position already equals the current
+     * position the call succeeds without invalidating, even while dirty
+     * state exists. An actual move first performs the dirty-safe whole-cache
+     * invalidation; a refused invalidation fails with DirtyState and leaves
+     * the Placement unchanged. Only a successful invalidation mutates the
+     * Placement.
      */
-    bool set_position(
+    MapPlacementMutationResult
+    set_position(
         PlacementId id,
         coord_type position) noexcept
     {
         placement_type* target = mutable_placement(id);
         if (target == nullptr)
-            return false;
+            return std::unexpected(MapPlacementMutationError::UnknownPlacement);
 
         if (target->position() == position)
-            return true;
+            return {};
+
+        if (!invalidate_all())
+            return std::unexpected(MapPlacementMutationError::DirtyState);
 
         target->set_position(position);
-        invalidate_all();
-        return true;
+        return {};
     }
 
 
@@ -656,25 +770,29 @@ public:
      * Rotation affects its contribution to every layer supplied by its
      * Patch.
      *
-     * Returns false for an unknown PlacementId. A change to the current
-     * rotation mutates the Placement and invalidates resident Map data;
-     * requesting the rotation it already has returns true without
-     * invalidating.
+     * Returns MapPlacementMutationError::UnknownPlacement for an unknown
+     * PlacementId. Requesting the rotation it already has succeeds without
+     * invalidating, even while dirty state exists. An actual change first
+     * performs the dirty-safe whole-cache invalidation; a refused
+     * invalidation fails with DirtyState and leaves the Placement unchanged.
      */
-    bool set_rotation(
+    MapPlacementMutationResult
+    set_rotation(
         PlacementId id,
         Rotation rotation) noexcept
     {
         placement_type* target = mutable_placement(id);
         if (target == nullptr)
-            return false;
+            return std::unexpected(MapPlacementMutationError::UnknownPlacement);
 
         if (target->rotation() == rotation)
-            return true;
+            return {};
+
+        if (!invalidate_all())
+            return std::unexpected(MapPlacementMutationError::DirtyState);
 
         target->set_rotation(rotation);
-        invalidate_all();
-        return true;
+        return {};
     }
 
 
@@ -683,55 +801,63 @@ public:
      *
      * Reflection is applied before rotation, as defined by Orientation.
      *
-     * Returns false for an unknown PlacementId. A change to the current
-     * reflection mutates the Placement and invalidates resident Map data;
-     * requesting the reflection it already has returns true without
-     * invalidating.
+     * Returns MapPlacementMutationError::UnknownPlacement for an unknown
+     * PlacementId. Requesting the reflection it already has succeeds without
+     * invalidating, even while dirty state exists. An actual change first
+     * performs the dirty-safe whole-cache invalidation; a refused
+     * invalidation fails with DirtyState and leaves the Placement unchanged.
      */
-    bool set_reflection(
+    MapPlacementMutationResult
+    set_reflection(
         PlacementId id,
         Reflection reflection) noexcept
     {
         placement_type* target = mutable_placement(id);
         if (target == nullptr)
-            return false;
+            return std::unexpected(MapPlacementMutationError::UnknownPlacement);
 
         if (target->reflection() == reflection)
-            return true;
+            return {};
+
+        if (!invalidate_all())
+            return std::unexpected(MapPlacementMutationError::DirtyState);
 
         target->set_reflection(reflection);
-        invalidate_all();
-        return true;
+        return {};
     }
 
 
     /**
      * Replace a Placement's complete orientation.
      *
-     * Returns false for an unknown PlacementId. A change to the current
-     * orientation mutates the Placement and invalidates resident Map data;
-     * requesting the orientation it already has returns true without
-     * invalidating.
+     * Returns MapPlacementMutationError::UnknownPlacement for an unknown
+     * PlacementId. Requesting the orientation it already has succeeds
+     * without invalidating, even while dirty state exists. An actual change
+     * first performs the dirty-safe whole-cache invalidation; a refused
+     * invalidation fails with DirtyState and leaves the Placement unchanged.
      */
-    bool set_orientation(
+    MapPlacementMutationResult
+    set_orientation(
         PlacementId id,
         Orientation orientation) noexcept
     {
         placement_type* target = mutable_placement(id);
         if (target == nullptr)
-            return false;
+            return std::unexpected(MapPlacementMutationError::UnknownPlacement);
 
         // Orientation equality is its two component fields, compared directly.
         const Orientation current = target->orientation();
         if (current.rotation == orientation.rotation
             && current.reflection == orientation.reflection)
         {
-            return true;
+            return {};
         }
 
+        if (!invalidate_all())
+            return std::unexpected(MapPlacementMutationError::DirtyState);
+
         target->set_orientation(orientation);
-        invalidate_all();
-        return true;
+        return {};
     }
 
 
@@ -1300,31 +1426,31 @@ private:
 
 
     /// Invalidate cached layer data covering one coordinate.
-    void invalidate(coord_type position) const noexcept
+    [[nodiscard]] bool invalidate(coord_type position) const noexcept
     {
-        m_cache.invalidate(area_type {position, position});
+        return m_cache.invalidate(area_type {position, position});
     }
 
 
     /// Invalidate cached layer data intersecting an area.
-    void invalidate(const area_type& area) const noexcept
+    [[nodiscard]] bool invalidate(const area_type& area) const noexcept
     {
-        m_cache.invalidate(area);
+        return m_cache.invalidate(area);
     }
 
 
     /**
      * Invalidate all resident data.
      *
-     * The current Cache has no dirty state, so dropping every resident slot
-     * cannot discard altered world state. The placement lifecycle uses this
-     * conservatively today; once transformed coverage and a write-back
-     * policy exist, placement changes must invalidate only the affected
-     * areas.
+     * Dirty-safe: returns false and changes nothing when a dirty resident
+     * layer plane would be discarded. The placement lifecycle relies on the
+     * refusal rather than on the invalidation always succeeding; once
+     * transformed coverage and a write-back policy exist, placement changes
+     * must invalidate only the affected areas.
      */
-    void invalidate_all() const noexcept
+    [[nodiscard]] bool invalidate_all() const noexcept
     {
-        m_cache.invalidate_all();
+        return m_cache.invalidate_all();
     }
 
 

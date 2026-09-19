@@ -103,9 +103,26 @@ TEST(WorldHeaders, MapPlacementResultTypesMatchTheLifecycleContract)
         decltype(std::declval<const TestMap&>().placement(landor::geo::PlacementId{})),
         const landor::geo::Placement<landor::geo::Coord32>*>);
     static_assert(std::is_same_v<
+        landor::geo::MapPlacementMutationResult,
+        std::expected<void, landor::geo::MapPlacementMutationError>>);
+    static_assert(std::is_same_v<
         decltype(std::declval<TestMap&>().set_position(landor::geo::PlacementId{},
                                                         landor::geo::Coord32{})),
-        bool>);
+        landor::geo::MapPlacementMutationResult>);
+    static_assert(std::is_same_v<
+        decltype(std::declval<TestMap&>().set_orientation(landor::geo::PlacementId{},
+                                                          landor::geo::Orientation{})),
+        landor::geo::MapPlacementMutationResult>);
+    SUCCEED();
+}
+
+
+TEST(WorldHeaders, MapSetReturnsTheCheckedAccessResultDomain)
+{
+    static_assert(std::is_same_v<
+        decltype(std::declval<TestMap&>().set<Fire>(landor::geo::Coord32{},
+                                                    std::uint8_t{0})),
+        landor::geo::MapResult<void>>);
     SUCCEED();
 }
 

@@ -8,15 +8,21 @@
 // The pinned contract:
 //
 // - place() resolves the PatchId through Map::patch(); an unknown PatchId
-//   yields MapPlacementError::UnknownPatch, checked before capacity, so a
-//   full Map never hides an invalid PatchId.
+//   yields MapPlacementError::UnknownPatch, checked before capacity and
+//   before dirty state, so a full Map or a dirty Cache never hides an
+//   invalid PatchId.
 // - A natural place() creates the occurrence at Patch::natural_position()
 //   with the default Orientation.
 // - Successful placements receive monotonically increasing PlacementIds
-//   starting at one; ids are never reused.
-// - Mutation returns false for an unknown PlacementId and true for a known
-//   one. An actual transform change invalidates resident Map data, while
-//   requesting the already-current value does not.
+//   starting at one; ids are never reused. The PlacementId is assigned only
+//   after the whole-cache invalidation has succeeded, so a refused
+//   invalidation (MapPlacementError::DirtyState) creates no Placement and
+//   consumes no id.
+// - Transform mutation returns MapPlacementMutationResult:
+//   UnknownPlacement for an unknown id, DirtyState when the whole-cache
+//   invalidation would discard dirty resident state. Invalidation happens
+//   before the Placement is modified; a no-op transform request needs no
+//   invalidation and succeeds even while dirty state exists.
 //
 // Invalidation is internal Map policy. These tests observe Placements only
 // through the public Map API and never touch the Cache, and they never
@@ -65,8 +71,8 @@ struct Fire
 static_assert(landor::geo::Layer<Fire>);
 
 /// Trivial terminal fallback provider satisfying the LayerFallbackProvider
-/// concept. The tests perform no world resolution, so the provider is never
-/// queried.
+/// concept. The dirty-state tests resolve the Fire layer through it, so the
+/// resolved value is zero and any non-zero set() marks the plane dirty.
 struct TestFallback
 {
     template<typename LayerT>
@@ -106,6 +112,39 @@ static_assert(std::is_same_v<
 static_assert(std::is_same_v<
     decltype(std::declval<const TestMap&>().placement(std::declval<PlacementId>())),
     const landor::geo::Placement<Coord32>*>);
+
+// The transform mutation result API is pinned: expected-based, and separate
+// from the creation result and the checked-world-access MapError domain.
+static_assert(std::is_same_v<
+    landor::geo::MapPlacementMutationResult,
+    std::expected<void, landor::geo::MapPlacementMutationError>>);
+
+static_assert(std::is_same_v<
+    decltype(std::declval<TestMap&>().set_position(std::declval<PlacementId>(),
+                                                    std::declval<Coord32>())),
+    landor::geo::MapPlacementMutationResult>);
+
+static_assert(std::is_same_v<
+    decltype(std::declval<TestMap&>().set_rotation(std::declval<PlacementId>(),
+                                                   std::declval<Rotation>())),
+    landor::geo::MapPlacementMutationResult>);
+
+static_assert(std::is_same_v<
+    decltype(std::declval<TestMap&>().set_reflection(std::declval<PlacementId>(),
+                                                     std::declval<Reflection>())),
+    landor::geo::MapPlacementMutationResult>);
+
+static_assert(std::is_same_v<
+    decltype(std::declval<TestMap&>().set_orientation(std::declval<PlacementId>(),
+                                                      std::declval<Orientation>())),
+    landor::geo::MapPlacementMutationResult>);
+
+// Map::set<LayerT>() is the first mutable world-state path and returns the
+// checked-access result domain.
+static_assert(std::is_same_v<
+    decltype(std::declval<TestMap&>().set<Fire>(std::declval<Coord32>(),
+                                                std::declval<std::uint8_t>())),
+    landor::geo::MapResult<void>>);
 
 
 [[nodiscard]] Patch make_patch(PatchId id, Coord32 natural_position)
@@ -209,7 +248,7 @@ TEST_F(MapPlacementTest, SamePatchCanBePlacedMultipleTimesIndependently)
     EXPECT_EQ(map.placement_count(), 2u);
 
     // Moving the second occurrence must not alter the first.
-    ASSERT_TRUE(map.set_position(*second, Coord32(61, 71)));
+    ASSERT_TRUE(map.set_position(*second, Coord32(61, 71)).has_value());
 
     const auto* a = map.placement(*first);
     const auto* b = map.placement(*second);
@@ -343,7 +382,7 @@ TEST_F(MapPlacementTest, SetPositionMovesPlacement)
     ASSERT_TRUE(placed.has_value());
 
     const Coord32 target(15, 25);
-    ASSERT_TRUE(map.set_position(*placed, target));
+    ASSERT_TRUE(map.set_position(*placed, target).has_value());
 
     const auto* placement = map.placement(*placed);
     ASSERT_NE(placement, nullptr);
@@ -359,7 +398,7 @@ TEST_F(MapPlacementTest, SetRotationChangesOnlyRotation)
     const auto placed = map.place(house_id);
     ASSERT_TRUE(placed.has_value());
 
-    ASSERT_TRUE(map.set_rotation(*placed, Rotation::r180));
+    ASSERT_TRUE(map.set_rotation(*placed, Rotation::r180).has_value());
 
     const auto* placement = map.placement(*placed);
     ASSERT_NE(placement, nullptr);
@@ -375,7 +414,7 @@ TEST_F(MapPlacementTest, SetReflectionChangesOnlyReflection)
     const auto placed = map.place(house_id);
     ASSERT_TRUE(placed.has_value());
 
-    ASSERT_TRUE(map.set_reflection(*placed, Reflection::y));
+    ASSERT_TRUE(map.set_reflection(*placed, Reflection::y).has_value());
 
     const auto* placement = map.placement(*placed);
     ASSERT_NE(placement, nullptr);
@@ -393,7 +432,7 @@ TEST_F(MapPlacementTest, SetOrientationReplacesBothComponents)
     ASSERT_TRUE(placed.has_value());
 
     ASSERT_TRUE(map.set_orientation(
-        *placed, Orientation {Rotation::r270, Reflection::xy}));
+        *placed, Orientation {Rotation::r270, Reflection::xy}).has_value());
 
     const auto* placement = map.placement(*placed);
     ASSERT_NE(placement, nullptr);
@@ -415,11 +454,19 @@ TEST_F(MapPlacementTest, MutationsRejectUnknownPlacementIds)
     const Coord32 position_before = before->position();
     const Orientation orientation_before = before->orientation();
 
-    EXPECT_FALSE(map.set_position(PlacementId(0), Coord32(0, 0)));
-    EXPECT_FALSE(map.set_position(PlacementId(99), Coord32(0, 0)));
-    EXPECT_FALSE(map.set_rotation(PlacementId(99), Rotation::r90));
-    EXPECT_FALSE(map.set_reflection(PlacementId(99), Reflection::x));
-    EXPECT_FALSE(map.set_orientation(PlacementId(99), Orientation {}));
+    const auto position = map.set_position(PlacementId(0), Coord32(0, 0));
+    const auto position_unknown = map.set_position(PlacementId(99), Coord32(0, 0));
+    const auto rotation = map.set_rotation(PlacementId(99), Rotation::r90);
+    const auto reflection = map.set_reflection(PlacementId(99), Reflection::x);
+    const auto orientation = map.set_orientation(PlacementId(99), Orientation {});
+
+    for (const auto& result : {position, position_unknown, rotation, reflection, orientation})
+    {
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(
+            result.error(),
+            landor::geo::MapPlacementMutationError::UnknownPlacement);
+    }
 
     const auto* after = map.placement(*placed);
     ASSERT_NE(after, nullptr);
@@ -436,11 +483,12 @@ TEST_F(MapPlacementTest, SettingCurrentStateSucceedsWithNoChange)
     ASSERT_TRUE(placed.has_value());
 
     // The placement was created at the natural position with the default
-    // orientation; re-requesting exactly that state must succeed each time.
-    ASSERT_TRUE(map.set_position(*placed, house_natural));
-    ASSERT_TRUE(map.set_rotation(*placed, Rotation::none));
-    ASSERT_TRUE(map.set_reflection(*placed, Reflection::none));
-    ASSERT_TRUE(map.set_orientation(*placed, Orientation {}));
+    // orientation; re-requesting exactly that state must succeed each time
+    // without invalidating.
+    ASSERT_TRUE(map.set_position(*placed, house_natural).has_value());
+    ASSERT_TRUE(map.set_rotation(*placed, Rotation::none).has_value());
+    ASSERT_TRUE(map.set_reflection(*placed, Reflection::none).has_value());
+    ASSERT_TRUE(map.set_orientation(*placed, Orientation {}).has_value());
 
     const auto* placement = map.placement(*placed);
     ASSERT_NE(placement, nullptr);
@@ -448,4 +496,167 @@ TEST_F(MapPlacementTest, SettingCurrentStateSucceedsWithNoChange)
     EXPECT_EQ(placement->rotation(), Rotation::none);
     EXPECT_EQ(placement->reflection(), Reflection::none);
     EXPECT_EQ(map.placement_count(), 1u);
+}
+
+
+// ---------------------------------------------------------------------------
+// Dirty-safe creation and mutation
+// ---------------------------------------------------------------------------
+
+TEST_F(MapPlacementTest, CreationBlockedByDirtyState)
+{
+    // Make the Fire layer resident (fallback value zero), then dirty.
+    ASSERT_TRUE(map.set<Fire>(Coord32(0, 0), std::uint8_t(9)).has_value());
+
+    const auto blocked = map.place(house_id);
+
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(blocked.error(), landor::geo::MapPlacementError::DirtyState);
+    EXPECT_EQ(map.placement_count(), 0u);
+
+    // The failed creation must not have consumed a PlacementId: no
+    // placement exists, and the first placement on this Map could only ever
+    // receive id 1.
+    EXPECT_EQ(map.placement(PlacementId(1)), nullptr);
+
+    // The dirty live value survives the refused creation.
+    const auto live = map.value<Fire>(Coord32(0, 0));
+    ASSERT_TRUE(live.has_value());
+    EXPECT_EQ(*live, std::uint8_t(9));
+}
+
+
+TEST_F(MapPlacementTest, UnknownPatchWinsOverDirtyState)
+{
+    ASSERT_TRUE(map.set<Fire>(Coord32(0, 0), std::uint8_t(9)).has_value());
+
+    const auto blocked = map.place(PatchId(42));
+
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(blocked.error(), landor::geo::MapPlacementError::UnknownPatch);
+    EXPECT_EQ(map.placement_count(), 0u);
+}
+
+
+TEST_F(MapPlacementTest, CapacityFullIsReportedWithoutInvalidation)
+{
+    ASSERT_TRUE(map.place(house_id).has_value());
+    ASSERT_TRUE(map.place(well_id).has_value());
+    ASSERT_TRUE(map.place(house_id).has_value());
+
+    // Dirty state that a reached invalidation would refuse.
+    ASSERT_TRUE(map.set<Fire>(Coord32(0, 0), std::uint8_t(9)).has_value());
+
+    const auto overflow = map.place(well_id);
+
+    // Capacity is checked before invalidation, so the result is
+    // CapacityFull, not DirtyState.
+    ASSERT_FALSE(overflow.has_value());
+    EXPECT_EQ(overflow.error(), landor::geo::MapPlacementError::CapacityFull);
+    EXPECT_EQ(map.placement_count(), 3u);
+
+    // The dirty live value is untouched: no invalidation was attempted.
+    const auto live = map.value<Fire>(Coord32(0, 0));
+    ASSERT_TRUE(live.has_value());
+    EXPECT_EQ(*live, std::uint8_t(9));
+}
+
+
+TEST_F(MapPlacementTest, TransformChangeBlockedByDirtyState)
+{
+    const auto placed = map.place(house_id);
+    ASSERT_TRUE(placed.has_value());
+
+    ASSERT_TRUE(map.set<Fire>(Coord32(0, 0), std::uint8_t(9)).has_value());
+
+    const auto blocked = map.set_position(*placed, Coord32(50, 60));
+
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(blocked.error(), landor::geo::MapPlacementMutationError::DirtyState);
+
+    // The Placement is unchanged and the dirty live value survives.
+    const auto* placement = map.placement(*placed);
+    ASSERT_NE(placement, nullptr);
+    EXPECT_EQ(placement->position(), house_natural);
+
+    const auto live = map.value<Fire>(Coord32(0, 0));
+    ASSERT_TRUE(live.has_value());
+    EXPECT_EQ(*live, std::uint8_t(9));
+}
+
+
+TEST_F(MapPlacementTest, RotationChangeBlockedByDirtyState)
+{
+    const auto placed = map.place(house_id);
+    ASSERT_TRUE(placed.has_value());
+
+    ASSERT_TRUE(map.set<Fire>(Coord32(0, 0), std::uint8_t(9)).has_value());
+
+    const auto blocked = map.set_rotation(*placed, Rotation::r90);
+
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(blocked.error(), landor::geo::MapPlacementMutationError::DirtyState);
+
+    const auto* placement = map.placement(*placed);
+    ASSERT_NE(placement, nullptr);
+    EXPECT_EQ(placement->rotation(), Rotation::none);
+}
+
+
+TEST_F(MapPlacementTest, ReflectionChangeBlockedByDirtyState)
+{
+    const auto placed = map.place(house_id);
+    ASSERT_TRUE(placed.has_value());
+
+    ASSERT_TRUE(map.set<Fire>(Coord32(0, 0), std::uint8_t(9)).has_value());
+
+    const auto blocked = map.set_reflection(*placed, Reflection::x);
+
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(blocked.error(), landor::geo::MapPlacementMutationError::DirtyState);
+
+    const auto* placement = map.placement(*placed);
+    ASSERT_NE(placement, nullptr);
+    EXPECT_EQ(placement->reflection(), Reflection::none);
+}
+
+
+TEST_F(MapPlacementTest, OrientationChangeBlockedByDirtyState)
+{
+    const auto placed = map.place(
+        house_id, Coord32(33, 44), Orientation {Rotation::r90});
+    ASSERT_TRUE(placed.has_value());
+
+    ASSERT_TRUE(map.set<Fire>(Coord32(0, 0), std::uint8_t(9)).has_value());
+
+    const auto blocked = map.set_orientation(
+        *placed, Orientation {Rotation::r270, Reflection::xy});
+
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(blocked.error(), landor::geo::MapPlacementMutationError::DirtyState);
+
+    const auto* placement = map.placement(*placed);
+    ASSERT_NE(placement, nullptr);
+    EXPECT_EQ(placement->rotation(), Rotation::r90);
+    EXPECT_EQ(placement->reflection(), Reflection::none);
+}
+
+
+TEST_F(MapPlacementTest, NoOpTransformSucceedsWhileDirty)
+{
+    const auto placed = map.place(house_id);
+    ASSERT_TRUE(placed.has_value());
+
+    ASSERT_TRUE(map.set<Fire>(Coord32(0, 0), std::uint8_t(9)).has_value());
+
+    // The requested state is the current state: no world composition change
+    // and no invalidation, so the dirty state cannot block the no-op.
+    ASSERT_TRUE(map.set_position(*placed, house_natural).has_value());
+    ASSERT_TRUE(map.set_rotation(*placed, Rotation::none).has_value());
+    ASSERT_TRUE(map.set_reflection(*placed, Reflection::none).has_value());
+    ASSERT_TRUE(map.set_orientation(*placed, Orientation {}).has_value());
+
+    const auto live = map.value<Fire>(Coord32(0, 0));
+    ASSERT_TRUE(live.has_value());
+    EXPECT_EQ(*live, std::uint8_t(9));
 }

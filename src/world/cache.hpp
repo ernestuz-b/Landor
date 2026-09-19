@@ -41,6 +41,13 @@ namespace landor::geo
  * This first implementation deliberately has no replacement or write-back
  * policy. When every spatial slot is occupied, filling a new area fails rather
  * than evicting existing state.
+ *
+ * Dirty tracking is per resident layer plane per spatial slot (one dirty
+ * bit, see DESIGN_DECISIONS.md D-37). A normal fill installs clean backing
+ * state and never overwrites a dirty plane; set() marks a changed plane
+ * dirty; and invalidation that would discard a dirty plane is refused
+ * atomically. There is no dirty-clearing or write-back path yet: dirty state
+ * disappears only when the Cache is destroyed.
  */
 template<
     std::size_t Capacity,
@@ -111,6 +118,76 @@ public:
     }
 
     /**
+     * Mutate one resident layer value.
+     *
+     * Precondition: contains<LayerT>(position).
+     *
+     * A value that differs from the current live value replaces it and marks
+     * the whole resident layer plane dirty. A value equal to the current live
+     * value changes nothing and does not turn a clean plane dirty; a plane
+     * that is already dirty stays dirty. Once dirty, the plane stays dirty
+     * until a future write-back/cleaning operation exists. No mutation
+     * sequence that happens to restore the backing contents is detected.
+     */
+    template<Layer LayerT>
+        requires (std::same_as<LayerT, Layers> || ...)
+    void set(
+        coord_type position,
+        typename LayerT::value_type value) noexcept
+    {
+        constexpr auto index = detail::layer_index<LayerT, Layers...>();
+        const auto origin = canonical_origin(position);
+        auto* slot = find_slot(origin);
+
+        assert(slot != nullptr);
+        assert(slot->resident[index]);
+
+        auto& plane = std::get<index>(slot->planes);
+        const auto local = local_index(position, origin);
+
+        if (plane[local] == value)
+        {
+            return;
+        }
+
+        plane[local] = value;
+        slot->dirty[index] = true;
+    }
+
+    /**
+     * True when the LayerT plane resident at position is dirty.
+     *
+     * A missing plane is never dirty, a resident clean plane is not dirty,
+     * and only a resident plane altered since it was filled reports dirty.
+     */
+    template<Layer LayerT>
+        requires (std::same_as<LayerT, Layers> || ...)
+    [[nodiscard]] bool dirty(coord_type position) const noexcept
+    {
+        constexpr auto index = detail::layer_index<LayerT, Layers...>();
+        const auto origin = canonical_origin(position);
+        const auto* slot = find_slot(origin);
+
+        return slot != nullptr && slot->resident[index] && slot->dirty[index];
+    }
+
+    /**
+     * True when any resident layer plane in any occupied slot is dirty.
+     */
+    [[nodiscard]] bool has_dirty() const noexcept
+    {
+        for (const auto& slot : m_slots)
+        {
+            if (slot_has_dirty_plane(slot))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Read one resident layer value.
      *
      * Precondition: contains<LayerT>(position).
@@ -165,9 +242,12 @@ public:
      *   - be aligned;
      *   - have side == CacheChunkSide.
      *
-     * Returns false when the bounded cache cannot accept the Chunk without a
-     * replacement/write-back decision. This function must not silently discard
-     * dirty state merely to make room.
+     * A normal source-resolution fill installs clean backing state. It
+     * returns false when the bounded cache cannot accept the Chunk without a
+     * replacement/write-back decision, or when the target layer plane is
+     * already dirty: a fill must never overwrite or otherwise discard dirty
+     * state. Filling another missing layer in the same spatial slot remains
+     * allowed when that plane is clean.
      *
      * The implementation fills the layer plane directly; it does not create
      * intermediate Tiles.
@@ -198,9 +278,18 @@ public:
             slot->occupied = true;
             slot->origin = chunk.origin();
             slot->resident.fill(false);
+            slot->dirty.fill(false);
         }
 
         constexpr auto index = detail::layer_index<LayerT, Layers...>();
+
+        // Never overwrite a dirty plane: dirty state must not be silently
+        // discarded to make room or to refresh backing state.
+        if (slot->dirty[index])
+        {
+            return false;
+        }
+
         auto& plane = std::get<index>(slot->planes);
         std::copy(values.begin(), values.end(), plane.begin());
         slot->resident[index] = true;
@@ -211,49 +300,80 @@ public:
     /**
      * Invalidate cached values intersecting an Area.
      *
-     * The initial cache core has no mutable/dirty layer state yet, so dropping
-     * residency cannot discard altered world state. A later write-back slice
-     * must strengthen this operation before dirty values are introduced.
+     * The operation is atomic. It first determines every occupied slot that
+     * would be discarded; when any of them carries a dirty resident layer
+     * plane the whole operation is refused and nothing is changed. Only when
+     * every intersecting slot is clean are all intersecting slots discarded.
+     *
+     * A dirty slot outside the requested area does not block the operation:
+     * only dirty state that the operation would actually discard can be
+     * refused.
+     *
+     * Until a write-back slice can flush dirty planes first, refusing is the
+     * safe behaviour: a plane may mix one mutated cell with many
+     * backing-resolved cells, and keeping the whole plane after a Placement
+     * change would preserve stale composition.
+     *
+     * Returns true when the requested slots were discarded (or none were
+     * intersected), false when the operation was refused unchanged.
      */
-    void invalidate(const area_type& area) noexcept
+    [[nodiscard]] bool invalidate(const area_type& area) noexcept
     {
         if (area.is_empty())
         {
-            return;
+            return true;
         }
 
-        for (auto& slot : m_slots)
+        // First pass: refuse the whole operation when it would discard a
+        // dirty resident layer plane. Nothing is changed before this pass.
+        for (const auto& slot : m_slots)
         {
-            if (!slot.occupied)
+            if (!slot.occupied || !slot_intersects(slot, area))
             {
                 continue;
             }
 
-            const chunk_type chunk {
-                static_cast<LayerId>(0),
-                slot.origin,
-                static_cast<typename chunk_type::side_type>(CacheChunkSide)
-            };
+            if (slot_has_dirty_plane(slot))
+            {
+                return false;
+            }
+        }
 
-            if (chunk.area().intersects(area))
+        // Second pass: every intersecting slot is clean; discard them all.
+        for (auto& slot : m_slots)
+        {
+            if (slot.occupied && slot_intersects(slot, area))
             {
                 slot = Slot {};
             }
         }
+
+        return true;
     }
 
     /**
      * Invalidate all resident data.
      *
-     * The same initial-core restriction as invalidate(area) applies: no dirty
-     * state exists yet.
+     * Atomic like invalidate(area): when any occupied slot carries a dirty
+     * resident layer plane the whole operation is refused and nothing is
+     * changed; otherwise every slot is cleared.
+     *
+     * Returns true when every slot was cleared, false when the operation was
+     * refused unchanged.
      */
-    void invalidate_all() noexcept
+    [[nodiscard]] bool invalidate_all() noexcept
     {
+        if (has_dirty())
+        {
+            return false;
+        }
+
         for (auto& slot : m_slots)
         {
             slot = Slot {};
         }
+
+        return true;
     }
 
     /**
@@ -271,12 +391,20 @@ private:
     template<Layer LayerT>
     using plane_type = std::array<typename LayerT::value_type, cells_per_plane>;
 
-    /** One canonical spatial area with independent layer residency. */
+    /**
+     * One canonical spatial area with independent layer residency and dirty
+     * state.
+     *
+     * A non-resident plane is never dirty; the two flags are maintained
+     * together. Dirty granularity is one bit per resident layer plane
+     * (D-37): mutating one cell marks the whole plane dirty.
+     */
     struct Slot
     {
         bool occupied = false;
         coord_type origin {};
         std::array<bool, layer_count> resident {};
+        std::array<bool, layer_count> dirty {};
         std::tuple<plane_type<Layers>...> planes {};
     };
 
@@ -342,6 +470,42 @@ private:
         }
 
         return nullptr;
+    }
+
+    /** The slot's canonical chunk, used for intersection tests. */
+    [[nodiscard]] static constexpr chunk_type
+    slot_chunk(const Slot& slot) noexcept
+    {
+        return chunk_type {
+            static_cast<LayerId>(0),
+            slot.origin,
+            static_cast<typename chunk_type::side_type>(CacheChunkSide)
+        };
+    }
+
+    [[nodiscard]] static bool
+    slot_intersects(const Slot& slot, const area_type& area) noexcept
+    {
+        return slot_chunk(slot).area().intersects(area);
+    }
+
+    /**
+     * True when the slot carries at least one dirty resident layer plane.
+     *
+     * A non-resident plane is never dirty, so the flag pair is checked
+     * together. The layer count is small, so a plain scan suffices.
+     */
+    [[nodiscard]] static bool slot_has_dirty_plane(const Slot& slot) noexcept
+    {
+        for (std::size_t i = 0; i < layer_count; ++i)
+        {
+            if (slot.resident[i] && slot.dirty[i])
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     std::array<Slot, Capacity> m_slots {};

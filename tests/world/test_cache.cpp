@@ -189,26 +189,149 @@ TEST(Cache, FillRejectsWrongLayerGeometryAndValueCount)
 }
 
 
-TEST(Cache, InvalidateDropsOnlyIntersectingSpatialSlots)
+TEST(Cache, FillInstallsACleanResidentPlane)
 {
     TestCache cache;
-    const auto first = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(0, 0));
-    const auto second = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(4, 0));
-    const auto values = sequence(1);
+    const auto chunk = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(1, 2));
+    const auto values = sequence(10);
 
-    ASSERT_TRUE(cache.fill<GroundLayer>(first, values));
-    ASSERT_TRUE(cache.fill<GroundLayer>(second, values));
+    ASSERT_TRUE(cache.fill<GroundLayer>(chunk, values));
 
-    cache.invalidate(landor::geo::Area32(
-        landor::geo::Coord32(2, 1),
-        landor::geo::Coord32(2, 1)));
-
-    EXPECT_FALSE(cache.contains<GroundLayer>(landor::geo::Coord32(0, 0)));
-    EXPECT_TRUE(cache.contains<GroundLayer>(landor::geo::Coord32(4, 0)));
+    EXPECT_TRUE(cache.contains<GroundLayer>(landor::geo::Coord32(1, 2)));
+    EXPECT_FALSE(cache.dirty<GroundLayer>(landor::geo::Coord32(1, 2)));
+    EXPECT_FALSE(cache.has_dirty());
 }
 
 
-TEST(Cache, InvalidateAllDropsEverySpatialSlot)
+TEST(Cache, SettingADifferentValueMarksThePlaneDirty)
+{
+    TestCache cache;
+    const auto chunk = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(0, 0));
+    const auto values = sequence(10);
+
+    ASSERT_TRUE(cache.fill<GroundLayer>(chunk, values));
+    ASSERT_FALSE(cache.dirty<GroundLayer>(landor::geo::Coord32(1, 1)));
+
+    cache.set<GroundLayer>(landor::geo::Coord32(1, 1), 200);
+
+    EXPECT_EQ(cache.value<GroundLayer>(landor::geo::Coord32(1, 1)), 200);
+    EXPECT_TRUE(cache.dirty<GroundLayer>(landor::geo::Coord32(1, 1)));
+    EXPECT_TRUE(cache.has_dirty());
+}
+
+
+TEST(Cache, SettingTheCurrentValueLeavesACleanPlaneClean)
+{
+    TestCache cache;
+    const auto chunk = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(0, 0));
+    const auto values = sequence(10);
+
+    ASSERT_TRUE(cache.fill<GroundLayer>(chunk, values));
+
+    // values[5] is the value at local (1, 1): x fastest row-major.
+    cache.set<GroundLayer>(landor::geo::Coord32(1, 1), values[5]);
+
+    EXPECT_EQ(cache.value<GroundLayer>(landor::geo::Coord32(1, 1)), values[5]);
+    EXPECT_FALSE(cache.dirty<GroundLayer>(landor::geo::Coord32(1, 1)));
+    EXPECT_FALSE(cache.has_dirty());
+}
+
+
+TEST(Cache, DirtyPlaneStaysDirtyWhenTheCurrentValueIsSetAgain)
+{
+    TestCache cache;
+    const auto chunk = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(0, 0));
+    const auto values = sequence(10);
+
+    ASSERT_TRUE(cache.fill<GroundLayer>(chunk, values));
+
+    cache.set<GroundLayer>(landor::geo::Coord32(1, 1), 200);
+    ASSERT_TRUE(cache.dirty<GroundLayer>(landor::geo::Coord32(1, 1)));
+
+    cache.set<GroundLayer>(landor::geo::Coord32(1, 1), 200);
+
+    EXPECT_EQ(cache.value<GroundLayer>(landor::geo::Coord32(1, 1)), 200);
+    EXPECT_TRUE(cache.dirty<GroundLayer>(landor::geo::Coord32(1, 1)));
+    EXPECT_TRUE(cache.has_dirty());
+}
+
+
+TEST(Cache, DirtyFlagsAreIndependentPerLayerPlane)
+{
+    TestCache cache;
+    const auto ground_chunk = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(0, 0));
+    const auto fire_chunk = TestCache::chunk_for<FireLayer>(landor::geo::Coord32(0, 0));
+    const auto ground_values = sequence(1);
+    const auto fire_values = sequence(101);
+
+    ASSERT_TRUE(cache.fill<GroundLayer>(ground_chunk, ground_values));
+    ASSERT_TRUE(cache.fill<FireLayer>(fire_chunk, fire_values));
+
+    cache.set<GroundLayer>(landor::geo::Coord32(1, 1), 200);
+
+    EXPECT_TRUE(cache.dirty<GroundLayer>(landor::geo::Coord32(1, 1)));
+    EXPECT_FALSE(cache.dirty<FireLayer>(landor::geo::Coord32(1, 1)));
+    EXPECT_TRUE(cache.contains(landor::geo::Coord32(1, 1)));
+    EXPECT_TRUE(cache.has_dirty());
+}
+
+
+TEST(Cache, DirtyIsFalseForAMissingPlane)
+{
+    TestCache cache;
+    const auto chunk = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(0, 0));
+    const auto values = sequence(1);
+
+    ASSERT_TRUE(cache.fill<GroundLayer>(chunk, values));
+
+    // Ground is resident and clean; Fire is not resident at all.
+    EXPECT_FALSE(cache.dirty<FireLayer>(landor::geo::Coord32(0, 0)));
+    EXPECT_FALSE(cache.has_dirty());
+}
+
+
+TEST(Cache, FillCannotOverwriteADirtyPlane)
+{
+    TestCache cache;
+    const auto chunk = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(0, 0));
+    const auto values = sequence(10);
+
+    ASSERT_TRUE(cache.fill<GroundLayer>(chunk, values));
+    cache.set<GroundLayer>(landor::geo::Coord32(1, 1), 200);
+    ASSERT_TRUE(cache.dirty<GroundLayer>(landor::geo::Coord32(1, 1)));
+
+    EXPECT_FALSE(cache.fill<GroundLayer>(chunk, values));
+
+    // The dirty value survived; the plane is still dirty.
+    EXPECT_EQ(cache.value<GroundLayer>(landor::geo::Coord32(1, 1)), 200);
+    EXPECT_TRUE(cache.dirty<GroundLayer>(landor::geo::Coord32(1, 1)));
+}
+
+
+TEST(Cache, FillCanAddAnotherLayerBesideADirtyPlane)
+{
+    TestCache cache;
+    const auto ground_chunk = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(0, 0));
+    const auto fire_chunk = TestCache::chunk_for<FireLayer>(landor::geo::Coord32(0, 0));
+    const auto ground_values = sequence(1);
+    const auto fire_values = sequence(101);
+
+    ASSERT_TRUE(cache.fill<GroundLayer>(ground_chunk, ground_values));
+    cache.set<GroundLayer>(landor::geo::Coord32(1, 1), 200);
+    ASSERT_TRUE(cache.dirty<GroundLayer>(landor::geo::Coord32(1, 1)));
+    ASSERT_FALSE(cache.contains<FireLayer>(landor::geo::Coord32(1, 1)));
+
+    ASSERT_TRUE(cache.fill<FireLayer>(fire_chunk, fire_values));
+
+    EXPECT_TRUE(cache.contains(landor::geo::Coord32(1, 1)));
+    EXPECT_EQ(cache.value<GroundLayer>(landor::geo::Coord32(1, 1)), 200);
+    EXPECT_TRUE(cache.dirty<GroundLayer>(landor::geo::Coord32(1, 1)));
+    EXPECT_EQ(cache.value<FireLayer>(landor::geo::Coord32(1, 1)), 106);
+    EXPECT_FALSE(cache.dirty<FireLayer>(landor::geo::Coord32(1, 1)));
+}
+
+
+TEST(Cache, InvalidateCleanAreaDiscardsIntersectingSpatialSlots)
 {
     TestCache cache;
     const auto first = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(0, 0));
@@ -218,10 +341,109 @@ TEST(Cache, InvalidateAllDropsEverySpatialSlot)
     ASSERT_TRUE(cache.fill<GroundLayer>(first, values));
     ASSERT_TRUE(cache.fill<GroundLayer>(second, values));
 
-    cache.invalidate_all();
+    ASSERT_TRUE(cache.invalidate(landor::geo::Area32(
+        landor::geo::Coord32(2, 1),
+        landor::geo::Coord32(2, 1))));
+
+    EXPECT_FALSE(cache.contains<GroundLayer>(landor::geo::Coord32(0, 0)));
+    EXPECT_TRUE(cache.contains<GroundLayer>(landor::geo::Coord32(4, 0)));
+    EXPECT_FALSE(cache.has_dirty());
+}
+
+
+TEST(Cache, InvalidateRefusesAtomicallyWhenAnIntersectingSlotIsDirty)
+{
+    TestCache cache;
+    const auto first = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(0, 0));
+    const auto second = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(4, 0));
+    const auto values = sequence(1);
+
+    ASSERT_TRUE(cache.fill<GroundLayer>(first, values));
+    ASSERT_TRUE(cache.fill<GroundLayer>(second, values));
+
+    // Slot two becomes dirty; slot one stays clean.
+    cache.set<GroundLayer>(landor::geo::Coord32(5, 0), 99);
+    ASSERT_FALSE(cache.dirty<GroundLayer>(landor::geo::Coord32(0, 0)));
+    ASSERT_TRUE(cache.dirty<GroundLayer>(landor::geo::Coord32(5, 0)));
+
+    // One area covers both spatial slots (x 0..7).
+    EXPECT_FALSE(cache.invalidate(landor::geo::Area32(
+        landor::geo::Coord32(0, 0),
+        landor::geo::Coord32(7, 0))));
+
+    // Atomic refusal: nothing was discarded, dirty state included.
+    EXPECT_TRUE(cache.contains<GroundLayer>(landor::geo::Coord32(0, 0)));
+    EXPECT_EQ(cache.value<GroundLayer>(landor::geo::Coord32(0, 0)), 1);
+    EXPECT_TRUE(cache.contains<GroundLayer>(landor::geo::Coord32(4, 0)));
+    EXPECT_EQ(cache.value<GroundLayer>(landor::geo::Coord32(5, 0)), 99);
+    EXPECT_TRUE(cache.dirty<GroundLayer>(landor::geo::Coord32(5, 0)));
+    EXPECT_TRUE(cache.has_dirty());
+}
+
+
+TEST(Cache, NonIntersectingDirtySlotDoesNotBlockInvalidate)
+{
+    TestCache cache;
+    const auto first = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(0, 0));
+    const auto second = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(4, 0));
+    const auto values = sequence(1);
+
+    ASSERT_TRUE(cache.fill<GroundLayer>(first, values));
+    ASSERT_TRUE(cache.fill<GroundLayer>(second, values));
+
+    cache.set<GroundLayer>(landor::geo::Coord32(5, 0), 99);
+
+    // Only the clean first slot intersects this area.
+    ASSERT_TRUE(cache.invalidate(landor::geo::Area32(
+        landor::geo::Coord32(0, 0),
+        landor::geo::Coord32(3, 0))));
+
+    EXPECT_FALSE(cache.contains<GroundLayer>(landor::geo::Coord32(0, 0)));
+    EXPECT_TRUE(cache.contains<GroundLayer>(landor::geo::Coord32(4, 0)));
+    EXPECT_EQ(cache.value<GroundLayer>(landor::geo::Coord32(5, 0)), 99);
+    EXPECT_TRUE(cache.dirty<GroundLayer>(landor::geo::Coord32(5, 0)));
+}
+
+
+TEST(Cache, InvalidateAllRefusesAtomicallyWhenAnyPlaneIsDirty)
+{
+    TestCache cache;
+    const auto first = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(0, 0));
+    const auto second = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(4, 0));
+    const auto values = sequence(1);
+
+    ASSERT_TRUE(cache.fill<GroundLayer>(first, values));
+    ASSERT_TRUE(cache.fill<GroundLayer>(second, values));
+
+    cache.set<GroundLayer>(landor::geo::Coord32(5, 0), 99);
+
+    EXPECT_FALSE(cache.invalidate_all());
+
+    // Both slots remain intact, dirty state included.
+    EXPECT_TRUE(cache.contains<GroundLayer>(landor::geo::Coord32(0, 0)));
+    EXPECT_EQ(cache.value<GroundLayer>(landor::geo::Coord32(0, 0)), 1);
+    EXPECT_TRUE(cache.contains<GroundLayer>(landor::geo::Coord32(4, 0)));
+    EXPECT_EQ(cache.value<GroundLayer>(landor::geo::Coord32(5, 0)), 99);
+    EXPECT_TRUE(cache.dirty<GroundLayer>(landor::geo::Coord32(5, 0)));
+    EXPECT_TRUE(cache.has_dirty());
+}
+
+
+TEST(Cache, InvalidateAllSucceedsAndClearsEveryCleanSlot)
+{
+    TestCache cache;
+    const auto first = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(0, 0));
+    const auto second = TestCache::chunk_for<GroundLayer>(landor::geo::Coord32(4, 0));
+    const auto values = sequence(1);
+
+    ASSERT_TRUE(cache.fill<GroundLayer>(first, values));
+    ASSERT_TRUE(cache.fill<GroundLayer>(second, values));
+
+    ASSERT_TRUE(cache.invalidate_all());
 
     EXPECT_FALSE(cache.contains<GroundLayer>(landor::geo::Coord32(0, 0)));
     EXPECT_FALSE(cache.contains<GroundLayer>(landor::geo::Coord32(4, 0)));
+    EXPECT_FALSE(cache.has_dirty());
 }
 
 

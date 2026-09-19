@@ -447,9 +447,10 @@ The current implementation has:
 
 - no replacement policy;
 - no eviction policy;
-- no dirty/write-back policy.
+- a dirty-state model (D-37): one sticky dirty bit per resident layer plane per spatial slot;
+- no write-back policy: a dirty plane cannot yet be flushed or cleared.
 
-When every spatial slot is occupied, filling a new spatial area fails rather than evicting existing state. Filling a missing layer in an already-present slot can still succeed, because it reuses the slot.
+When every spatial slot is occupied, filling a new spatial area fails rather than evicting existing state. Filling a missing layer in an already-present slot can still succeed, because it reuses the slot — unless that plane is already dirty, in which case `fill()` refuses to overwrite it and returns `false`. Both invalidation forms are dirty-safe: if they would discard a dirty resident plane they refuse atomically and change nothing, returning `false`.
 
 ## Cache representation
 
@@ -460,13 +461,15 @@ It does not reorganise the resident world into an array of Tiles. Instead, each 
 ```text
 Spatial slot: origin (32, 64)
 
-Ground plane:  resident
+Ground plane:  resident, dirty
 Height plane:  resident
 Water plane:   missing
 Fire plane:    resident
 ```
 
-Each layer plane is independently resident. A missing layer for an already-present spatial slot can be filled without allocating another spatial slot.
+Each layer plane is independently resident and independently dirty. A dirty plane is one whose resident values have changed since it was filled: a changed `set<LayerT>()` dirties the whole plane, a same-value set does not dirty a clean plane, and once dirty a plane stays dirty (D-37). The dirty bit is the protection hook for the unflushed value: `fill()` will not overwrite a dirty plane, and invalidation refuses atomically rather than discard one.
+
+A missing layer for an already-present spatial slot can be filled without allocating another spatial slot.
 
 The cache does not store authoritative Tile objects. When a complete Tile is requested, `Cache::tile(position)` constructs a fresh value by selecting one value from each resident layer plane at that coordinate:
 
@@ -498,7 +501,7 @@ const auto result = map.at(23, 14);
 
 validates that `(23, 14)` belongs to the Map before performing the underlying operation.
 
-The checked outcome is an expected-based result: `at()` and `value<LayerT>()` return `MapResult<T>` (`src/world/map_result.hpp`), whose `MapError` carries the Map-local outcomes `OutOfBounds` and `CacheFull` plus the preserved lower-level `LayerSourceError` and `AuthoredLayerSourceError`.
+The checked outcome is an expected-based result: `at()`, `value<LayerT>()` and `set<LayerT>()` return `MapResult<T>` (`src/world/map_result.hpp`), whose `MapError` carries the Map-local outcomes `OutOfBounds` and `CacheFull` plus the preserved lower-level `LayerSourceError`, `AuthoredLayerSourceError` and `RuntimeLayerSourceError` (D-36). Dirty state is deliberately not a `MapError`: a dirty resident value is valid live state, and `set<LayerT>()` never fails because state is dirty (D-37).
 
 There is little value in exposing a separate unchecked public access path.
 

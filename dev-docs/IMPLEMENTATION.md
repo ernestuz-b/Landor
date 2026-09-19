@@ -134,6 +134,7 @@ Each slot stores:
 occupied flag
 canonical origin
 per-layer residency flags
+per-layer dirty flags
 one fixed layer plane per supported Layer
 ```
 
@@ -149,14 +150,23 @@ The current implementation provides:
 - `contains<LayerT>(position)`;
 - `contains(position)` for complete-Tile residency;
 - `value<LayerT>(position)` for resident layer reads;
+- `set<LayerT>(position, value)` for resident layer mutation;
+- `dirty<LayerT>(position)` for per-plane dirty queries;
+- `has_dirty()` for any-dirty-state queries;
 - `tile(position)` for presentation-time Tile packing;
 - `fill<LayerT>(chunk, values)`;
-- `invalidate(area)`;
-- `invalidate_all()`.
+- `invalidate(area)`, `[[nodiscard]] bool`, dirty-safe;
+- `invalidate_all()`, `[[nodiscard]] bool`, dirty-safe.
 
 `fill()` can populate a missing layer in an already-existing spatial slot without consuming another slot.
 
 If a new spatial area is requested when all slots are occupied, `fill()` returns `false`. The implementation deliberately does not invent an eviction policy.
+
+`fill()` is also dirty-safe: it refuses to overwrite a dirty target plane and returns `false` without writing, so a resolved value can never silently replace an unflushed mutation (D-37).
+
+`set<LayerT>()` mutates an already-resident value and marks that resident layer plane dirty when — and only when — the value actually changes; a same-value set is a no-op on a clean plane. Dirty flags are per resident layer plane per spatial slot, not per cell: `fill()` installs a clean plane, and once a plane is dirty it stays dirty. There is no flush, clear or write-back API: dirty state persists until the Cache is destroyed.
+
+Both invalidation forms are atomic and dirty-safe: if any slot that would be discarded contains a dirty resident plane, the whole operation is refused and the Cache remains unchanged, returning `false`. A dirty slot outside the invalidated area does not block `invalidate(area)`, because it is not discarded.
 
 ### Tile packing
 
@@ -166,11 +176,12 @@ The returned Tile is not cache storage. It remains valid independently of future
 
 ### Deferred Cache policy
 
-The current Cache has no:
+The current Cache has a dirty-state model (D-37): one dirty bit per resident layer plane per spatial slot, marked by a changed `set<LayerT>()`, sticky, and protected by dirty-safe `fill()`/`invalidate()`/`invalidate_all()` refusal.
+
+It still has no:
 
 - replacement policy;
-- dirty-state model;
-- write-back policy;
+- write-back policy (dirty planes cannot yet be flushed or cleared);
 - procedural materialisation policy.
 
 These are future slices and must not be inferred from the existing no-eviction implementation.
@@ -359,6 +370,8 @@ It validates the coordinate first (OutOfBounds before any cache, source or fallb
 
 `Map::value<LayerT>(position)` is implemented: it validates the coordinate first (OutOfBounds before any cache, source or fallback work), ensures only the requested layer is resident through the chunk-plane seam below, and returns the resident layer value from the Cache.
 
+`Map::set<LayerT>(position, value)` is the first mutable world-state path: it validates the coordinate first, ensures only the requested layer is resident through the same chunk-plane seam (installing a clean plane when the Chunk is missing), then mutates the resident value through `Cache::set<LayerT>()`, which marks the layer plane dirty only when the value actually changes. No Storage write happens, dirty state is not a `MapError`, and the dirty resident value is authoritative for subsequent reads of that Chunk — `value<LayerT>()` and `at()` return it without rereading runtime, authored or fallback state. A missing runtime binding only means there is no persistent runtime source yet; the dirty plane simply cannot be persisted until a write-back slice exists.
+
 There is deliberately no public unchecked `Map::operator[]` path.
 
 The checked access contract is now expressed as an expected-based result in `src/world/map_result.hpp`:
@@ -383,7 +396,7 @@ Unsupported layer types remain compile-time errors. Both the single-layer `value
 The implemented single-layer seam is:
 
 ```text
-Map request (value<LayerT>)
+Map request (value<LayerT>, set<LayerT>)
     -> contains(position) check (OutOfBounds before any other work)
     -> Cache residency check (a resident hit touches no source and no fallback)
     -> determine the missing canonical layer Chunk containing position
@@ -419,14 +432,15 @@ Authored precedence is pinned to stable Placement identity: a higher `PlacementI
 
 ### Placement creation and mutation
 
-`place()` (both overloads) returns `MapPlacementResult = std::expected<PlacementId, MapPlacementError>`, where `MapPlacementError` is a scoped enum with `UnknownPatch` and `CapacityFull`:
+`place()` (both overloads) returns `MapPlacementResult = std::expected<PlacementId, MapPlacementError>`, where `MapPlacementError` is a scoped enum with `UnknownPatch`, `CapacityFull`, and `DirtyState`:
 
-- `UnknownPatch`: the id does not resolve in the Patch catalogue; checked before capacity, so a full Map never reports `CapacityFull` for an unknown Patch;
-- `CapacityFull`: every fixed `MaxPlacements` slot is already occupied.
+- `UnknownPatch`: the id does not resolve in the Patch catalogue; checked first, so a full Map or a dirty Cache never hides an invalid Patch id;
+- `CapacityFull`: every fixed `MaxPlacements` slot is already occupied; checked before invalidation, so a capacity failure is reported without attempting any invalidation;
+- `DirtyState`: the whole-cache invalidation would discard dirty resident state, so it was refused atomically (D-37).
 
-Successful creation assigns the next stable `PlacementId`, starting at 1 and increasing monotonically; ids are never reused. The natural overload places at the Patch's natural position with the identity orientation; the explicit overload uses the requested position and orientation.
+The `PlacementId` is assigned only after the invalidation has succeeded and the Placement is constructed only after the id assignment, so a `DirtyState` failure creates no Placement and consumes no id. Successful creation otherwise assigns the next stable `PlacementId`, starting at 1 and increasing monotonically; ids are never reused. The natural overload places at the Patch's natural position with the identity orientation; the explicit overload uses the requested position and orientation.
 
-Public lookup is const-only: `placement(PlacementId)` performs a bounded search and returns `const placement_type*`, `nullptr` for unknown ids. `set_position()`, `set_rotation()`, `set_reflection()`, and `set_orientation()` return `bool`: `false` for unknown ids, `true` for known ones, and the stored Placement is modified only when the requested value differs from the current one. Any real change invalidates resident Cache data — currently the whole Cache, because transformed Patch coverage does not exist yet (D-33).
+Public lookup is const-only: `placement(PlacementId)` performs a bounded search and returns `const placement_type*`, `nullptr` for unknown ids. `set_position()`, `set_rotation()`, `set_reflection()`, and `set_orientation()` return `MapPlacementMutationResult = std::expected<void, MapPlacementMutationError>`: `UnknownPlacement` for unknown ids; the stored Placement is modified only when the requested value differs from the current one, and a no-op transform request needs no invalidation and succeeds even while dirty state exists. Any real change first invalidates resident Cache data — currently the whole Cache, because transformed Patch coverage does not exist yet (D-33) — and only after that dirty-safe invalidation succeeds is the Placement modified; a refused invalidation fails with `MapPlacementMutationError::DirtyState` and leaves the Placement unchanged.
 
 ## 12. Storage contract
 
@@ -531,6 +545,7 @@ tests/world/test_layer_fallback.cpp
 tests/world/test_authored_layer_source.cpp
 tests/world/test_placement.cpp
 tests/world/test_map_placement.cpp
+tests/world/test_map_mutation.cpp
 tests/world/test_map_result.cpp
 tests/world/test_map_value.cpp
 tests/world/test_map_at.cpp
@@ -577,7 +592,7 @@ Checked single-layer access `Map::value<LayerT>()` is now implemented and tested
 
 The recommended order is:
 
-1. fuse Map mutation, Cache mutation, dirty tracking and dirty-safe invalidation into one coherent change (runtime overlay read resolution is now implemented, D-36; the checked single-layer `value<LayerT>()` slice and the checked multi-layer `Map::at()` are implemented and tested);
+1. fuse Map mutation, Cache mutation, dirty tracking and dirty-safe invalidation into one coherent change (the checked single-layer `value<LayerT>()` slice, the checked multi-layer `Map::at()`, the runtime overlay read resolution, and the first mutable world-state path `Map::set<LayerT>()` with per-plane Cache dirty tracking and dirty-safe invalidation are now implemented and tested, D-36 and D-37);
 2. add replacement/write-back policy only after the no-eviction path is proven;
 3. introduce `Region` only when a simulation needs it.
 

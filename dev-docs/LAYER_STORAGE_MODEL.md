@@ -76,6 +76,8 @@ simulation/game changes resident state
     -> later write-back updates the corresponding runtime-source ranges
 ```
 
+The first half of that flow is implemented (D-37): `Map::set<LayerT>()` mutates one live layer value through the Cache and marks the resident layer plane dirty; the dirty resident value is authoritative for subsequent reads of that Chunk. The write-back half does not exist yet, so a dirty plane cannot be flushed or cleared, and no Storage write happens in any current path.
+
 The Cache therefore mediates simulation state; the files provide persistence/backing storage.
 
 ## Runtime state belongs to the live world
@@ -144,9 +146,9 @@ The exact creation policy, allocation API, naming, and source registration mecha
 
 ## Dirty state and write-back
 
-Mutable resident layer data will eventually need dirty tracking.
+Dirty tracking is implemented (D-37) as one sticky bit per resident layer plane per spatial slot: a changed `Cache::set<LayerT>()` dirties the whole plane, a same-value set does not, and once dirty a plane stays dirty until the Cache is destroyed. The dirty value is authoritative while resident, `fill()` refuses to overwrite a dirty target plane, and both invalidation forms refuse atomically — changing nothing — when they would discard a dirty resident plane.
 
-The intended direction is:
+Write-back is still open. The intended direction is:
 
 ```text
 simulation/game mutation
@@ -158,9 +160,9 @@ simulation/game mutation
 
 Write-back should operate on the required runtime-source ranges rather than requiring the complete layer to be assembled or rewritten in memory.
 
-Eviction must not discard dirty state. Before a dirty layer region can be evicted, its required runtime state must be safely persisted or eviction must fail/defer.
+Eviction must not discard dirty state. Before a dirty layer region can be evicted, its required runtime state must be safely persisted or eviction must fail/defer. With the current no-eviction Cache this is implemented as atomic refusal: dirty-safe `invalidate(area)` and `invalidate_all()` fail and change nothing rather than discard a dirty plane, and the Placement lifecycle surfaces the refusal as its own `DirtyState` management error.
 
-The exact granularity of dirty tracking and write-back — cell, range, Chunk, layer plane, or another measured choice — is not pinned yet.
+The dirty-state granularity is pinned by D-37 (per resident layer plane per spatial slot). The write-back granularity — cell, range, Chunk, layer plane, or another measured choice — is not pinned yet and may differ from the dirty-state granularity.
 
 ## Storage separation
 
@@ -223,7 +225,6 @@ This document does not yet define:
 - runtime source filenames;
 - runtime `SourceId` allocation/registration;
 - runtime file creation API;
-- dirty-state granularity;
 - write-back scheduling;
 - crash consistency or atomic replacement policy;
 - cache eviction policy;

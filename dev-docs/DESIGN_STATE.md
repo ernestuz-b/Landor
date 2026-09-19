@@ -167,6 +167,8 @@ When a caller requests a Tile, Map ensures the required layer planes are residen
 
 The current first Cache implementation deliberately has no replacement or write-back policy. Full capacity causes a new-area fill to fail rather than silently inventing eviction semantics.
 
+Dirty state is per resident layer plane per spatial slot, not per cell (D-37): a changed resident value dirties the whole plane, a same-value set does not dirty a clean plane, and once dirty a plane stays dirty until the Cache is destroyed. `fill()` refuses to overwrite a dirty target plane, and both invalidation forms refuse atomically — changing nothing — when they would discard a dirty resident plane. A dirty plane cannot be flushed, cleared or written back yet.
+
 ### 5.6 Region is algorithmic, not storage-shaped
 
 `Region` is an intended higher-level working-area concept for simulations/game systems.
@@ -232,7 +234,7 @@ Orientation does not renormalise the transformed rectangle; coordinates may beco
 
 Several Placements may reuse one Patch.
 
-Mutation of a Placement goes through the owning Map so affected cached layer data can be invalidated correctly.
+Mutation of a Placement goes through the owning Map so affected cached layer data can be invalidated correctly. The invalidation is dirty-safe (D-37): a placement change that alters the world composition performs the whole-cache invalidation before modifying the Placement, and a refused invalidation fails with a placement-management `DirtyState` error leaving the Placement unchanged; a no-op transform request needs no invalidation and succeeds even while dirty state exists.
 
 ### 6.3 PatchSet
 
@@ -292,7 +294,7 @@ The Map:
 - combines authored, materialized/working and terminal fallback state;
 - owns/integrates a bounded layer-oriented Cache;
 - returns compact Tile values assembled from resident layer state;
-- presents checked public world access.
+- presents checked public world access and checked single-cell layer mutation (`set<LayerT>()`).
 
 Overlap resolution is per-layer. A Placement that supplies no value for one layer does not hide a lower-priority contribution to that layer.
 
@@ -311,7 +313,7 @@ The runtime overlay step (D-36) is live in checked reads: when a runtime layer b
 
 A Placement declines a cell — resolution then continues downward — when its Patch has no binding for the layer, the world coordinate is outside its transformed Patch, or the authored cell is ASCII space `0x20`.
 
-Missing canonical Cache layer Chunks are connected to that source-resolution path through the same chunk-plane seam, which now serves both checked point-access paths: `value<LayerT>()` returns one resident layer value, and `at()` ensures every supported layer is resident in the Map template's declared layer order (fail-fast, returning the exact first `MapError` unchanged), then packs the complete owned `Tile` through `Cache::tile()`. Both validate that the coordinate belongs to the Map before any residency work. No storage format beyond the repository's existing contracts is used.
+Missing canonical Cache layer Chunks are connected to that source-resolution path through the same chunk-plane seam, which now serves the checked point-access paths and the mutation path: `value<LayerT>()` returns one resident layer value, `at()` ensures every supported layer is resident in the Map template's declared layer order (fail-fast, returning the exact first `MapError` unchanged) and then packs the complete owned `Tile` through `Cache::tile()`, and `set<LayerT>()` ensures only the requested layer is resident and then mutates the resident value through the Cache, marking the layer plane dirty only when the value actually changes (D-37). All three validate that the coordinate belongs to the Map before any residency work. Once a resident plane is dirty, its value is authoritative for subsequent reads of that Chunk without rereading runtime, authored or fallback state, and no Storage write happens in `set<LayerT>()`: the layer simply has no persistent runtime source yet when no binding names it. No storage format beyond the repository's existing contracts is used.
 
 ## 8. Simulation and mutation
 
@@ -323,7 +325,7 @@ World mutations should have a small number of explicit front doors so Cache inva
 
 A Tile returned by value is not a live proxy into the world. Mutating the Tile changes only the local copy.
 
-The exact mutation API is still open and should be introduced by concrete simulation requirements rather than by speculative framework design.
+The first mutation door is implemented: `Map::set<LayerT>(position, value)` mutates one live layer value through the Cache, marks the resident layer plane dirty, and performs no Storage write (D-37). Dirty state is not a checked-access failure: it never appears in `MapError`, and dirty-safe invalidation keeps the value from being discarded until a write-back slice exists. The broader mutation API remains open and should be introduced by concrete simulation requirements rather than by speculative framework design.
 
 ## 9. Storage
 
@@ -602,7 +604,7 @@ The following remain intentionally open:
 - final mutation API between simulations and materialized layer state;
 - exact source/layer/spatial-coordinate to byte-range mapping where not already defined by a concrete format;
 - Cache replacement policy;
-- dirty-state/write-back policy;
+- dirty write-back/flush policy (dirty state itself is implemented per D-37);
 - `Region` ownership/view/mutation semantics;
 - long-term repository relationship of `include/managed_heap/` (vendored vs submodule/subrepo);
 - exact logging record representation and formatter on embedded targets;
